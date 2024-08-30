@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/erpc/erpc/common"
 	"github.com/redis/go-redis/v9"
@@ -23,6 +24,7 @@ var _ Connector = (*RedisConnector)(nil)
 type RedisConnector struct {
 	logger *zerolog.Logger
 	client *redis.Client
+	ttls   map[string]time.Duration
 }
 
 func NewRedisConnector(
@@ -62,6 +64,7 @@ func NewRedisConnector(
 	return &RedisConnector{
 		logger: logger,
 		client: client,
+		ttls:   make(map[string]time.Duration),
 	}, nil
 }
 
@@ -91,14 +94,33 @@ func createTLSConfig(tlsCfg *common.TLSConfig) (*tls.Config, error) {
 	return config, nil
 }
 
+func (r *RedisConnector) SetTTL(method string, ttlStr string) error {
+	ttl, err := time.ParseDuration(ttlStr)
+	if err != nil {
+		return err
+	}
+	r.ttls[strings.ToLower(method)] = ttl
+	return nil
+}
+
+func (r *RedisConnector) HasTTL(method string) bool {
+	_, found := r.ttls[strings.ToLower(method)]
+	return found
+}
+
 func (r *RedisConnector) Set(ctx context.Context, partitionKey, rangeKey, value string) error {
 	r.logger.Debug().Msgf("writing to Redis with partition key: %s and range key: %s", partitionKey, rangeKey)
+	method := strings.ToLower(strings.Split(rangeKey, ":")[0])
+	ttl, found := r.ttls[method]
+	if !found {
+		ttl = time.Duration(0)
+	}
 	key := fmt.Sprintf("%s:%s", partitionKey, rangeKey)
-	rs := r.client.Set(ctx, key, value, 0)
+	rs := r.client.Set(ctx, key, value, ttl)
 	return rs.Err()
 }
 
-func (r *RedisConnector) Get(ctx context.Context, index, partitionKey, rangeKey string) (string, error) {
+func (r *RedisConnector) Get(ctx context.Context, _, partitionKey, rangeKey string) (string, error) {
 	var err error
 	var value string
 

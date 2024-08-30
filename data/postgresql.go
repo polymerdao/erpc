@@ -59,6 +59,15 @@ func NewPostgreSQLConnector(ctx context.Context, logger *zerolog.Logger, cfg *co
 	}, nil
 }
 
+func (p *PostgreSQLConnector) SetTTL(_ string, _ string) error {
+	p.logger.Debug().Msgf("Method TTLs not implemented for PostgresSQLConnector")
+	return nil
+}
+
+func (p *PostgreSQLConnector) HasTTL(_ string) bool {
+	return false
+}
+
 func (p *PostgreSQLConnector) Set(ctx context.Context, partitionKey, rangeKey, value string) error {
 	p.logger.Debug().Msgf("writing to PostgreSQL with partition key: %s and range key: %s", partitionKey, rangeKey)
 

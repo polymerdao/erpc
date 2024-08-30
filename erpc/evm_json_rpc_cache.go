@@ -35,6 +35,13 @@ func NewEvmJsonRpcCache(ctx context.Context, logger *zerolog.Logger, cfg *common
 		return nil, err
 	}
 
+	// set TTL method overrides
+	for _, cacheInfo := range cfg.Methods {
+		if err := c.SetTTL(cacheInfo.Method, cacheInfo.TTL); err != nil {
+			return nil, err
+		}
+	}
+
 	return &EvmJsonRpcCache{
 		conn:   c,
 		logger: logger,
@@ -56,11 +63,13 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 		return nil, err
 	}
 
+	hasTTL := c.conn.HasTTL(rpcReq.Method)
+
 	blockRef, blockNumber, err := common.ExtractEvmBlockReferenceFromRequest(rpcReq)
 	if err != nil {
 		return nil, err
 	}
-	if blockRef == "" && blockNumber == 0 {
+	if blockRef == "" && blockNumber == 0 && !hasTTL {
 		return nil, nil
 	}
 	if blockNumber != 0 {
@@ -124,7 +133,9 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 		return err
 	}
 
-	if blockRef == "" && blockNumber == 0 {
+	hasTTL := c.conn.HasTTL(rpcReq.Method)
+
+	if blockRef == "" && blockNumber == 0 && !hasTTL {
 		// Do not cache if we can't resolve a block reference (e.g. latest block requests)
 		lg.Debug().
 			Str("blockRef", blockRef).
