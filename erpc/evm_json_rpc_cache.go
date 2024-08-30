@@ -135,25 +135,27 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 
 	hasTTL := c.conn.HasTTL(rpcReq.Method)
 
-	if blockRef == "" && blockNumber == 0 && !hasTTL {
-		// Do not cache if we can't resolve a block reference (e.g. latest block requests)
-		lg.Debug().
-			Str("blockRef", blockRef).
-			Int64("blockNumber", blockNumber).
-			Msg("will not cache the response because it has no block reference or block number")
-		return nil
-	}
-
-	if blockNumber > 0 {
-		s, e := c.shouldCacheForBlock(blockNumber)
-		if !s || e != nil {
+	if !hasTTL {
+		if blockRef == "" && blockNumber == 0 {
+			// Do not cache if we can't resolve a block reference (e.g. latest block requests)
 			lg.Debug().
-				Err(e).
 				Str("blockRef", blockRef).
 				Int64("blockNumber", blockNumber).
-				Interface("result", rpcResp.Result).
-				Msg("will not cache the response because block is not finalized")
-			return e
+				Msg("will not cache the response because it has no block reference or block number")
+			return nil
+		}
+
+		if blockNumber > 0 {
+			s, e := c.shouldCacheForBlock(blockNumber)
+			if !s || e != nil {
+				lg.Debug().
+					Err(e).
+					Str("blockRef", blockRef).
+					Int64("blockNumber", blockNumber).
+					Interface("result", rpcResp.Result).
+					Msg("will not cache the response because block is not finalized")
+				return e
+			}
 		}
 	}
 
