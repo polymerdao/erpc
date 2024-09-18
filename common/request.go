@@ -40,6 +40,11 @@ type RequestDirectives struct {
 
 type NormalizedRequest struct {
 	sync.RWMutex
+<<<<<<< HEAD
+=======
+
+	Attempt int
+>>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 
 	network Network
 	body    []byte
@@ -49,8 +54,13 @@ type NormalizedRequest struct {
 	directives     *RequestDirectives
 	jsonRpcRequest *JsonRpcRequest
 
+<<<<<<< HEAD
 	lastValidResponse atomic.Pointer[NormalizedResponse]
 	lastUpstream      atomic.Value
+=======
+	lastValidResponse *NormalizedResponse
+	lastUpstream      Upstream
+>>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 }
 
 type UniqueRequestKey struct {
@@ -71,7 +81,13 @@ func (r *NormalizedRequest) SetLastUpstream(upstream Upstream) *NormalizedReques
 	if r == nil {
 		return r
 	}
+<<<<<<< HEAD
 	r.lastUpstream.Store(upstream)
+=======
+	r.Lock()
+	defer r.Unlock()
+	r.lastUpstream = upstream
+>>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 	return r
 }
 
@@ -79,24 +95,42 @@ func (r *NormalizedRequest) LastUpstream() Upstream {
 	if r == nil {
 		return nil
 	}
+<<<<<<< HEAD
 	if lu := r.lastUpstream.Load(); lu != nil {
 		return lu.(Upstream)
 	}
 	return nil
+=======
+	r.Lock()
+	defer r.Unlock()
+	return r.lastUpstream
+>>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 }
 
 func (r *NormalizedRequest) SetLastValidResponse(response *NormalizedResponse) {
 	if r == nil {
 		return
 	}
+<<<<<<< HEAD
 	r.lastValidResponse.Store(response)
+=======
+	r.Lock()
+	defer r.Unlock()
+	r.lastValidResponse = response
+>>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 }
 
 func (r *NormalizedRequest) LastValidResponse() *NormalizedResponse {
 	if r == nil {
 		return nil
 	}
+<<<<<<< HEAD
 	return r.lastValidResponse.Load()
+=======
+	r.RLock()
+	defer r.RUnlock()
+	return r.lastValidResponse
+>>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 }
 
 func (r *NormalizedRequest) Network() Network {
@@ -108,11 +142,42 @@ func (r *NormalizedRequest) Network() Network {
 
 func (r *NormalizedRequest) Id() int64 {
 	if r == nil {
+<<<<<<< HEAD
 		return 0
+=======
+		return ""
 	}
 
+	if r.uid != "" {
+		return r.uid
+>>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
+	}
+
+	r.RLock()
 	if r.jsonRpcRequest != nil {
+<<<<<<< HEAD
 		return r.jsonRpcRequest.ID
+=======
+		defer r.RUnlock()
+		if id, ok := r.jsonRpcRequest.ID.(string); ok {
+			r.uid = id
+			return id
+		} else if id, ok := r.jsonRpcRequest.ID.(float64); ok {
+			r.uid = fmt.Sprintf("%d", int64(id))
+			return r.uid
+		} else {
+			r.uid = fmt.Sprintf("%v", r.jsonRpcRequest.ID)
+			return r.uid
+		}
+>>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
+	}
+	r.RUnlock()
+
+	r.Lock()
+	defer r.Unlock()
+
+	if r.uid != "" {
+		return r.uid
 	}
 
 	if len(r.body) > 0 {
