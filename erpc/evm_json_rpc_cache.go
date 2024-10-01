@@ -65,7 +65,6 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 
 	hasTTL := c.conn.HasTTL(rpcReq.Method)
 
-	req.Mu.RLock()
 	blockRef, blockNumber, err := common.ExtractEvmBlockReferenceFromRequest(rpcReq)
 	if err != nil {
 		return nil, err
