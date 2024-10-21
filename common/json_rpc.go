@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -473,7 +474,7 @@ func (r *JsonRpcRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (r *JsonRpcRequest) MarshalZerologObject(e *zerolog.Event) {
+func (r *JsonRpcResponse) MarshalZerologObject(e *zerolog.Event) {
 	if r == nil {
 		return
 	}

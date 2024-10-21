@@ -939,7 +939,6 @@ var NewErrUpstreamMethodIgnored = func(method string, upstreamId string) error {
 func (e *ErrUpstreamMethodIgnored) ErrorStatusCode() int {
 	return http.StatusUnsupportedMediaType
 }
-
 type ErrUpstreamSyncing struct{ BaseError }
 
 const ErrCodeUpstreamSyncing ErrorCode = "ErrUpstreamSyncing"

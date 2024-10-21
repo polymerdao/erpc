@@ -277,7 +277,6 @@ func (c *GenericHttpJsonRpcClient) processBatch() {
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", fmt.Sprintf("erpc (%s/%s; Project/%s; Budget/%s)", common.ErpcVersion, common.ErpcCommitSha, c.upstream.ProjectId, c.upstream.config.RateLimitBudget))
-
 	// Make the HTTP request
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
