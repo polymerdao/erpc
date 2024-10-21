@@ -1,32 +1,20 @@
 package common
 
 import (
-<<<<<<< HEAD
 	"io"
 	"sync"
 	"sync/atomic"
 
 	"github.com/rs/zerolog/log"
-=======
-	"sync"
-
-	"github.com/bytedance/sonic"
->>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 )
 
 type NormalizedResponse struct {
 	sync.RWMutex
 
-<<<<<<< HEAD
 	request      *NormalizedRequest
 	body         io.ReadCloser
 	expectedSize int
 	err          error
-=======
-	request *NormalizedRequest
-	body    []byte
-	err     error
->>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 
 	fromCache bool
 	attempts  int
@@ -227,15 +215,8 @@ func (r *NormalizedResponse) EvmBlockNumber() (int64, error) {
 		return 0, nil
 	}
 
-<<<<<<< HEAD
 	if n := r.evmBlockNumber.Load(); n != 0 {
 		return n, nil
-=======
-	r.RLock()
-	if r.evmBlockNumber != 0 {
-		defer r.RUnlock()
-		return r.evmBlockNumber, nil
->>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 	}
 	r.RUnlock()
 
@@ -258,13 +239,7 @@ func (r *NormalizedResponse) EvmBlockNumber() (int64, error) {
 		return 0, err
 	}
 
-<<<<<<< HEAD
 	r.evmBlockNumber.Store(bn)
-=======
-	r.Lock()
-	r.evmBlockNumber = bn
-	r.Unlock()
->>>>>>> 39b9549 (fix: improve thread-safety of request handling for high load (#65))
 
 	return bn, nil
 }

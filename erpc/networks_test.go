@@ -5087,8 +5087,8 @@ func TestNetwork_Forward(t *testing.T) {
 		defer gock.Off()
 		defer gock.Clean()
 		defer gock.CleanUnmatchedRequest()
-
 		var requestBytes = []byte(`{"jsonrpc":"2.0","method":"eth_getLogs","params":[{"address":"0x1234567890abcdef1234567890abcdef12345678"}],"id": 1}`)
+
 
 		gock.New("https://rpc.hypersync.xyz").
 			Post("").
@@ -5449,6 +5449,7 @@ func TestNetwork_Forward(t *testing.T) {
 			}
 		}
 	})
+
 }
 
 func TestNetwork_InFlightRequests(t *testing.T) {

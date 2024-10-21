@@ -202,7 +202,6 @@ func (fs *FakeServer) processSingleRequest(req JSONRPCRequest) *JSONRPCResponse 
 		}
 		return nil // Notification, no response
 	}
-
 	// Simulate failure
 	if rand.Float64() < fs.FailureRate {
 		fs.mu.Lock()

@@ -221,6 +221,7 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 				if err := exec.Context().Err(); err != nil {
 					return nil, err
 				}
+
 				// We need to use write-lock here because "i" is being updated.
 				req.Lock()
 				u := upsList[i]
