@@ -71,6 +71,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 
 		assert.NoError(t, err)
 		mockConnector.AssertNotCalled(t, "Set")
+		mockConnector.On("HasTTL", mock.AnythingOfType("string")).Return(false)
 	})
 
 	t.Run("CacheIfBlockNumberIsFinalizedWhenBlockIsIrrelevantForPrimaryKey", func(t *testing.T) {
@@ -107,6 +108,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 
 	t.Run("SkipWhenNoRefAndNoBlockNumberFound", func(t *testing.T) {
 		mockConnector, _, cache := createCacheTestFixtures(10, 15, nil)
+		mockConnector.On("HasTTL", mock.AnythingOfType("string")).Return(false)
 
 		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x123","latest"],"id":1}`))
 		resp := common.NewNormalizedResponse().WithBody(util.StringToReaderCloser(`{"result":"0x1234"}`))
@@ -119,6 +121,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 
 	t.Run("CacheIfBlockRefFoundWhetherBlockNumberExistsOrNot", func(t *testing.T) {
 		mockConnector, mockNetwork, cache := createCacheTestFixtures(10, 15, nil)
+		mockConnector.On("HasTTL", mock.AnythingOfType("string")).Return(false)
 
 		testCases := []struct {
 			name        string
