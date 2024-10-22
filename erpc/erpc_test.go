@@ -2,10 +2,7 @@ package erpc
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"math/rand"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -18,7 +15,7 @@ import (
 )
 
 func init() {
-	log.Logger = log.Level(zerolog.ErrorLevel).Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	zerolog.SetGlobalLevel(zerolog.Disabled)
 }
 
 var erpcMu sync.Mutex
@@ -84,10 +81,10 @@ func TestErpc_UpstreamsRegistryCorrectPriorityChange(t *testing.T) {
 				// 30% chance of failure
 				if rand.Intn(100) < 30 {
 					r.Status(500)
-					r.JSON(json.RawMessage(`{"error":{"code":-32000,"message":"internal server error"}}`))
+					r.JSON([]byte(`{"error":{"code":-32000,"message":"internal server error"}}`))
 				} else {
 					r.Status(200)
-					r.JSON(json.RawMessage(`{"result":{"hash":"0x123456789","fromHost":"rpc1"}}`))
+					r.JSON([]byte(`{"result":{"hash":"0x123456789","fromHost":"rpc1"}}`))
 				}
 			})
 	}
@@ -96,7 +93,7 @@ func TestErpc_UpstreamsRegistryCorrectPriorityChange(t *testing.T) {
 		Persist().
 		Post("").
 		Reply(200).
-		JSON(json.RawMessage(`{"result":{"hash":"0x123456789","fromHost":"rpc2"}}`))
+		JSON([]byte(`{"result":{"hash":"0x123456789","fromHost":"rpc2"}}`))
 
 	lg := log.With().Logger()
 	ctx1, cancel1 := context.WithCancel(context.Background())
@@ -134,7 +131,6 @@ func TestErpc_UpstreamsRegistryCorrectPriorityChange(t *testing.T) {
 	cancel2()
 
 	sortedUpstreams, err := nw.upstreamsRegistry.GetSortedUpstreams("evm:123", "eth_getTransactionReceipt")
-	fmt.Printf("Checking upstream order: %v\n", sortedUpstreams)
 
 	expectedOrder := []string{"rpc2", "rpc1"}
 	assert.NoError(t, err)

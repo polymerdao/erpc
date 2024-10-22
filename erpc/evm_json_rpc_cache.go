@@ -2,14 +2,13 @@ package erpc
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/bytedance/sonic"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 )
 
@@ -63,6 +62,9 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 		return nil, err
 	}
 
+	rpcReq.RLock()
+	defer rpcReq.RUnlock()
+
 	hasTTL := c.conn.HasTTL(rpcReq.Method)
 
 	blockRef, blockNumber, err := common.ExtractEvmBlockReferenceFromRequest(rpcReq)
@@ -99,10 +101,11 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 	}
 
 	jrr := &common.JsonRpcResponse{
-		JSONRPC: rpcReq.JSONRPC,
-		ID:      rpcReq.ID,
-		Error:   nil,
-		Result:  json.RawMessage(resultString),
+		Result: util.Str2Mem(resultString),
+	}
+	err = jrr.SetID(rpcReq.ID)
+	if err != nil {
+		return nil, err
 	}
 
 	return common.NewNormalizedResponse().
@@ -124,7 +127,7 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 
 	lg := c.logger.With().Str("networkId", req.NetworkId()).Str("method", rpcReq.Method).Logger()
 
-	shouldCache, err := shouldCache(lg, req, resp, rpcReq, rpcResp)
+	shouldCache, err := shouldCacheResponse(lg, req, resp, rpcReq, rpcResp)
 	if !shouldCache || err != nil {
 		return err
 	}
@@ -145,27 +148,18 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 		return nil
 	}
 
-	if !hasTTL {
-		if blockRef == "" && blockNumber == 0 {
-			// Do not cache if we can't resolve a block reference (e.g. latest block requests)
-			lg.Debug().
-				Str("blockRef", blockRef).
-				Int64("blockNumber", blockNumber).
-				Msg("will not cache the response because it has no block reference or block number")
-			return nil
-		}
-
-		if blockNumber > 0 {
-			s, e := c.shouldCacheForBlock(blockNumber)
-			if !s || e != nil {
+	if blockNumber > 0 {
+		s, e := c.shouldCacheForBlock(blockNumber)
+		if !s || e != nil {
+			if lg.GetLevel() <= zerolog.DebugLevel {
 				lg.Debug().
 					Err(e).
 					Str("blockRef", blockRef).
 					Int64("blockNumber", blockNumber).
-					Interface("result", rpcResp.Result).
+					Str("result", util.Mem2Str(rpcResp.Result)).
 					Msg("will not cache the response because block is not finalized")
-				return e
 			}
+			return e
 		}
 	}
 
@@ -174,25 +168,22 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 		return err
 	}
 
-	lg.Debug().
-		Str("blockRef", blockRef).
-		Str("primaryKey", pk).
-		Str("rangeKey", rk).
-		Int64("blockNumber", blockNumber).
-		Interface("result", rpcResp.Result).
-		Msg("caching the response")
-
-	resultBytes, err := sonic.Marshal(rpcResp.Result)
-	if err != nil {
-		return err
+	if lg.GetLevel() <= zerolog.DebugLevel {
+		lg.Debug().
+			Str("blockRef", blockRef).
+			Str("primaryKey", pk).
+			Str("rangeKey", rk).
+			Int64("blockNumber", blockNumber).
+			Str("result", util.Mem2Str(rpcResp.Result)).
+			Msg("caching the response")
 	}
 
 	ctx, cancel := context.WithTimeoutCause(ctx, 5*time.Second, errors.New("evm json-rpc cache driver timeout during set"))
 	defer cancel()
-	return c.conn.Set(ctx, pk, rk, string(resultBytes))
+	return c.conn.Set(ctx, pk, rk, util.Mem2Str(rpcResp.Result))
 }
 
-func shouldCache(
+func shouldCacheResponse(
 	lg zerolog.Logger,
 	req *common.NormalizedRequest,
 	resp *common.NormalizedResponse,
@@ -265,8 +256,7 @@ func (c *EvmJsonRpcCache) DeleteByGroupKey(ctx context.Context, groupKeys ...str
 }
 
 func (c *EvmJsonRpcCache) shouldCacheForBlock(blockNumber int64) (bool, error) {
-	b, e := c.network.EvmIsBlockFinalized(blockNumber)
-	return b, e
+	return c.network.EvmIsBlockFinalized(blockNumber)
 }
 
 func generateKeysForJsonRpcRequest(req *common.NormalizedRequest, blockRef string) (string, string, error) {

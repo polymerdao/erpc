@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/bytedance/sonic"
 )
 
 func IsNull(err interface{}) bool {
@@ -97,7 +95,7 @@ func (e *BaseError) Error() string {
 	var detailsStr string
 
 	if e.Details != nil && len(e.Details) > 0 {
-		s, er := sonic.Marshal(e.Details)
+		s, er := SonicCfg.Marshal(e.Details)
 		if er == nil {
 			detailsStr = fmt.Sprintf("(%s)", s)
 		} else {
@@ -158,7 +156,7 @@ func (e BaseError) MarshalJSON() ([]byte, error) {
 				causes = append(causes, err.Error())
 			}
 		}
-		return sonic.Marshal(&struct {
+		return SonicCfg.Marshal(&struct {
 			Alias
 			Cause []interface{} `json:"cause"`
 		}{
@@ -166,7 +164,7 @@ func (e BaseError) MarshalJSON() ([]byte, error) {
 			Cause: causes,
 		})
 	} else if cs, ok := cause.(StandardError); ok {
-		return sonic.Marshal(&struct {
+		return SonicCfg.Marshal(&struct {
 			Alias
 			Cause StandardError `json:"cause"`
 		}{
@@ -174,7 +172,7 @@ func (e BaseError) MarshalJSON() ([]byte, error) {
 			Cause: cs,
 		})
 	} else if cause != nil {
-		return sonic.Marshal(&struct {
+		return SonicCfg.Marshal(&struct {
 			Alias
 			Cause BaseError `json:"cause"`
 		}{
@@ -186,7 +184,7 @@ func (e BaseError) MarshalJSON() ([]byte, error) {
 		})
 	}
 
-	return sonic.Marshal(&struct {
+	return SonicCfg.Marshal(&struct {
 		Alias
 		Cause interface{} `json:"cause"`
 	}{
@@ -700,6 +698,8 @@ func (e *ErrUpstreamsExhausted) SummarizeCauses() string {
 		cbOpen := 0
 		billing := 0
 		other := 0
+		client := 0
+		transport := 0
 		cancelled := 0
 
 		for _, e := range joinedErr.Unwrap() {
@@ -727,6 +727,12 @@ func (e *ErrUpstreamsExhausted) SummarizeCauses() string {
 				continue
 			} else if HasErrorCode(e, ErrCodeUpstreamHedgeCancelled) {
 				cancelled++
+				continue
+			} else if HasErrorCode(e, ErrCodeEndpointClientSideException) || HasErrorCode(e, ErrCodeJsonRpcRequestUnmarshal) {
+				client++
+				continue
+			} else if HasErrorCode(e, ErrCodeEndpointTransportFailure) {
+				transport++
 				continue
 			} else if !HasErrorCode(e, ErrCodeUpstreamMethodIgnored) {
 				other++
@@ -757,6 +763,9 @@ func (e *ErrUpstreamsExhausted) SummarizeCauses() string {
 		}
 		if cancelled > 0 {
 			reasons = append(reasons, fmt.Sprintf("%d hedges cancelled", cancelled))
+		}
+		if client > 0 {
+			reasons = append(reasons, fmt.Sprintf("%d user errors", client))
 		}
 		if other > 0 {
 			reasons = append(reasons, fmt.Sprintf("%d other errors", other))
@@ -927,6 +936,10 @@ var NewErrUpstreamMethodIgnored = func(method string, upstreamId string) error {
 	}
 }
 
+func (e *ErrUpstreamMethodIgnored) ErrorStatusCode() int {
+	return http.StatusUnsupportedMediaType
+}
+
 type ErrUpstreamSyncing struct{ BaseError }
 
 const ErrCodeUpstreamSyncing ErrorCode = "ErrUpstreamSyncing"
@@ -961,14 +974,15 @@ type ErrUpstreamHedgeCancelled struct{ BaseError }
 
 const ErrCodeUpstreamHedgeCancelled ErrorCode = "ErrUpstreamHedgeCancelled"
 
-var NewErrUpstreamHedgeCancelled = func(upstreamId string) error {
+var NewErrUpstreamHedgeCancelled = func(upstreamId string, cause error) error {
 	return &ErrUpstreamHedgeCancelled{
 		BaseError{
 			Code:    ErrCodeUpstreamHedgeCancelled,
-			Message: "hedged request cancelled in favor another response",
+			Message: "hedged request cancelled in favor of another response",
 			Details: map[string]interface{}{
 				"upstreamId": upstreamId,
 			},
+			Cause: cause,
 		},
 	}
 }
@@ -995,14 +1009,29 @@ type ErrJsonRpcRequestUnmarshal struct {
 	BaseError
 }
 
-const ErrCodeJsonRpcRequestUnmarshal = "ErrJsonRpcRequestUnmarshal"
+const ErrCodeJsonRpcRequestUnmarshal ErrorCode = "ErrJsonRpcRequestUnmarshal"
 
 var NewErrJsonRpcRequestUnmarshal = func(cause error) error {
+	if _, ok := cause.(*BaseError); ok {
+		return &ErrJsonRpcRequestUnmarshal{
+			BaseError{
+				Code:    ErrCodeJsonRpcRequestUnmarshal,
+				Message: "failed to unmarshal json-rpc request",
+				Cause:   cause,
+			},
+		}
+	} else if cause != nil {
+		return &ErrJsonRpcRequestUnmarshal{
+			BaseError{
+				Code:    ErrCodeJsonRpcRequestUnmarshal,
+				Message: fmt.Sprintf("%s", cause),
+			},
+		}
+	}
 	return &ErrJsonRpcRequestUnmarshal{
 		BaseError{
 			Code:    ErrCodeJsonRpcRequestUnmarshal,
 			Message: "failed to unmarshal json-rpc request",
-			Cause:   cause,
 		},
 	}
 }
@@ -1318,6 +1347,20 @@ func (e *ErrEndpointClientSideException) ErrorStatusCode() int {
 	return http.StatusBadRequest
 }
 
+type ErrEndpointTransportFailure struct{ BaseError }
+
+const ErrCodeEndpointTransportFailure = "ErrEndpointTransportFailure"
+
+var NewErrEndpointTransportFailure = func(cause error) error {
+	return &ErrEndpointTransportFailure{
+		BaseError{
+			Code:    ErrCodeEndpointTransportFailure,
+			Message: "failure when sending request to remote endpoint",
+			Cause:   cause,
+		},
+	}
+}
+
 type ErrEndpointServerSideException struct{ BaseError }
 
 const ErrCodeEndpointServerSideException = "ErrEndpointServerSideException"
@@ -1407,21 +1450,29 @@ var NewErrEndpointMissingData = func(cause error) error {
 	}
 }
 
-type ErrEndpointEvmLargeRange struct{ BaseError }
+type ErrEndpointRequestTooLarge struct{ BaseError }
 
-const ErrCodeEndpointEvmLargeRange = "ErrEndpointEvmLargeRange"
+const ErrCodeEndpointRequestTooLarge = "ErrEndpointRequestTooLarge"
 
-var NewErrEndpointEvmLargeRange = func(cause error) error {
-	return &ErrEndpointEvmLargeRange{
+type TooLargeComplaint string
+
+const EvmBlockRangeTooLarge TooLargeComplaint = "evm_block_range"
+const EvmAddressesTooLarge TooLargeComplaint = "evm_addresses"
+
+var NewErrEndpointRequestTooLarge = func(cause error, complaint TooLargeComplaint) error {
+	return &ErrEndpointRequestTooLarge{
 		BaseError{
-			Code:    ErrCodeEndpointEvmLargeRange,
-			Message: "evm remote endpoint complained about large logs range",
+			Code:    ErrCodeEndpointRequestTooLarge,
+			Message: "remote endpoint complained about large request (e.g. block range, number of addresses, etc)",
 			Cause:   cause,
+			Details: map[string]interface{}{
+				"complaint": complaint,
+			},
 		},
 	}
 }
 
-func (e *ErrEndpointEvmLargeRange) ErrorStatusCode() int {
+func (e *ErrEndpointRequestTooLarge) ErrorStatusCode() int {
 	return http.StatusRequestEntityTooLarge
 }
 
@@ -1441,6 +1492,7 @@ const (
 	JsonRpcErrorUnknown JsonRpcErrorNumber = -99999
 
 	// Standard JSON-RPC codes
+	JsonRpcErrorCallException        JsonRpcErrorNumber = -32000
 	JsonRpcErrorClientSideException  JsonRpcErrorNumber = -32600
 	JsonRpcErrorUnsupportedException JsonRpcErrorNumber = -32601
 	JsonRpcErrorInvalidArgument      JsonRpcErrorNumber = -32602
@@ -1456,7 +1508,6 @@ const (
 	JsonRpcErrorMissingData       JsonRpcErrorNumber = -32014
 	JsonRpcErrorNodeTimeout       JsonRpcErrorNumber = -32015
 	JsonRpcErrorUnauthorized      JsonRpcErrorNumber = -32016
-	JsonRpcErrorCallException     JsonRpcErrorNumber = -32017
 )
 
 // This struct represents an json-rpc error with erpc structure (i.e. code is string)
@@ -1518,7 +1569,7 @@ type ErrJsonRpcExceptionExternal struct {
 	Message string `json:"message,omitempty"`
 
 	// Some errors such as execution reverted carry "data" field which has additional information
-	Data string `json:"data,omitempty"`
+	Data interface{} `json:"data,omitempty"`
 }
 
 func NewErrJsonRpcExceptionExternal(code int, message string, data string) *ErrJsonRpcExceptionExternal {
@@ -1632,4 +1683,9 @@ func IsCapacityIssue(err error) bool {
 		HasErrorCode(err, ErrCodeUpstreamRateLimitRuleExceeded) ||
 		HasErrorCode(err, ErrCodeAuthRateLimitRuleExceeded) ||
 		HasErrorCode(err, ErrCodeEndpointCapacityExceeded)
+}
+
+func IsClientError(err error) bool {
+	return err != nil && (HasErrorCode(err, ErrCodeEndpointClientSideException) ||
+		HasErrorCode(err, ErrCodeJsonRpcRequestUnmarshal))
 }

@@ -1,12 +1,13 @@
 package erpc
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"path"
+
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/erpc/erpc/auth"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/health"
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 	"github.com/valyala/fasthttp"
 )
@@ -25,12 +27,6 @@ type HttpServer struct {
 	server *fasthttp.Server
 	erpc   *ERPC
 	logger *zerolog.Logger
-}
-
-var bufPool = sync.Pool{
-	New: func() interface{} {
-		return new(bytes.Buffer)
-	},
 }
 
 func NewHttpServer(ctx context.Context, logger *zerolog.Logger, cfg *common.ServerConfig, erpc *ERPC) *HttpServer {
@@ -57,6 +53,7 @@ func NewHttpServer(ctx context.Context, logger *zerolog.Logger, cfg *common.Serv
 		),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
+		Name:         fmt.Sprintf("erpc (%s/%s)", common.ErpcVersion, common.ErpcCommitSha),
 	}
 
 	go func() {
@@ -76,7 +73,7 @@ func (s *HttpServer) createRequestHandler(mainCtx context.Context, reqMaxTimeout
 		defer func() {
 			defer func() { recover() }()
 			if r := recover(); r != nil {
-				msg := fmt.Sprintf("unexpected server panic on top-level handler: %v -> %s", r, string(debug.Stack()))
+				msg := fmt.Sprintf("unexpected server panic on top-level handler: %v -> %s", r, util.Mem2Str(debug.Stack()))
 				s.logger.Error().Msgf(msg)
 				fastCtx.SetStatusCode(fasthttp.StatusInternalServerError)
 				fastCtx.Response.Header.Set("Content-Type", "application/json")
@@ -84,38 +81,25 @@ func (s *HttpServer) createRequestHandler(mainCtx context.Context, reqMaxTimeout
 			}
 		}()
 
-		buf := bufPool.Get().(*bytes.Buffer)
-		defer bufPool.Put(buf)
-		buf.Reset()
-		encoder := json.NewEncoder(buf)
+		encoder := common.SonicCfg.NewEncoder(fastCtx.Response.BodyWriter())
+		encoder.SetEscapeHTML(false)
 
-		segments := strings.Split(string(fastCtx.Path()), "/")
-		if len(segments) != 2 && len(segments) != 3 && len(segments) != 4 {
-			handleErrorResponse(s.logger, nil, common.NewErrInvalidUrlPath(string(fastCtx.Path())), fastCtx, encoder, buf)
+		projectId, architecture, chainId, isAdmin, isHealthCheck, err := s.parseUrlPath(fastCtx)
+		if err != nil {
+			handleErrorResponse(s.logger, nil, err, fastCtx, encoder)
 			return
 		}
 
-		projectId := segments[1]
-		architecture, chainId := "", ""
-		isAdmin := false
-
-		if len(segments) == 4 {
-			architecture = segments[2]
-			chainId = segments[3]
-		} else if len(segments) == 3 {
-			if segments[2] == "admin" {
-				isAdmin = true
-			} else {
-				handleErrorResponse(s.logger, nil, common.NewErrInvalidUrlPath(string(fastCtx.Path())), fastCtx, encoder, buf)
-				return
-			}
+		if isHealthCheck {
+			s.handleHealthCheck(fastCtx, encoder)
+			return
 		}
 
 		lg := s.logger.With().Str("projectId", projectId).Str("architecture", architecture).Str("chainId", chainId).Logger()
 
 		project, err := s.erpc.GetProject(projectId)
 		if err != nil {
-			handleErrorResponse(&lg, nil, err, fastCtx, encoder, buf)
+			handleErrorResponse(&lg, nil, err, fastCtx, encoder)
 			return
 		}
 
@@ -134,11 +118,21 @@ func (s *HttpServer) createRequestHandler(mainCtx context.Context, reqMaxTimeout
 		lg.Debug().Msgf("received request with body: %s", body)
 
 		var requests []json.RawMessage
-		err = sonic.Unmarshal(body, &requests)
-		isBatch := err == nil
-
+		isBatch := len(body) > 0 && body[0] == '['
 		if !isBatch {
 			requests = []json.RawMessage{body}
+		} else {
+			err = common.SonicCfg.Unmarshal(body, &requests)
+			if err != nil {
+				handleErrorResponse(
+					&lg,
+					nil,
+					common.NewErrJsonRpcRequestUnmarshal(err),
+					fastCtx,
+					encoder,
+				)
+				return
+			}
 		}
 
 		responses := make([]interface{}, len(requests))
@@ -155,7 +149,7 @@ func (s *HttpServer) createRequestHandler(mainCtx context.Context, reqMaxTimeout
 				defer func() {
 					defer func() { recover() }()
 					if r := recover(); r != nil {
-						msg := fmt.Sprintf("unexpected server panic on per-request handler: %v -> %s", r, string(debug.Stack()))
+						msg := fmt.Sprintf("unexpected server panic on per-request handler: %v -> %s", r, util.Mem2Str(debug.Stack()))
 						lg.Error().Msgf(msg)
 						fastCtx.SetStatusCode(fasthttp.StatusInternalServerError)
 						fastCtx.Response.Header.Set("Content-Type", "application/json")
@@ -218,7 +212,7 @@ func (s *HttpServer) createRequestHandler(mainCtx context.Context, reqMaxTimeout
 
 				if architecture == "" || chainId == "" {
 					var req map[string]interface{}
-					if err := sonic.Unmarshal(rawReq, &req); err != nil {
+					if err := common.SonicCfg.Unmarshal(rawReq, &req); err != nil {
 						responses[index] = processErrorBody(&rlg, nq, common.NewErrInvalidRequest(err))
 						return
 					}
@@ -267,6 +261,11 @@ func (s *HttpServer) createRequestHandler(mainCtx context.Context, reqMaxTimeout
 		if isBatch {
 			fastCtx.SetStatusCode(fasthttp.StatusOK)
 			err = encoder.Encode(responses)
+			for _, resp := range responses {
+				if r, ok := resp.(*common.NormalizedResponse); ok {
+					r.Release()
+				}
+			}
 			if err != nil {
 				fastCtx.SetStatusCode(fasthttp.StatusInternalServerError)
 				fastCtx.Response.Header.Set("Content-Type", "application/json")
@@ -277,25 +276,64 @@ func (s *HttpServer) createRequestHandler(mainCtx context.Context, reqMaxTimeout
 			res := responses[0]
 			setResponseHeaders(res, fastCtx)
 			setResponseStatusCode(res, fastCtx)
-			err = encoder.Encode(res)
+			if r, ok := res.(*common.NormalizedResponse); ok {
+				rdr, err := r.GetReader()
+				if err != nil {
+					fastCtx.SetStatusCode(fasthttp.StatusInternalServerError)
+					fastCtx.SetBodyString(fmt.Sprintf(`{"jsonrpc":"2.0","error":{"code":-32603,"message":"%s"}}`, err.Error()))
+					return
+				}
+				fastCtx.Response.SetBodyStream(rdr, -1)
+				r.Release()
+			} else {
+				err = encoder.Encode(res)
+			}
 			if err != nil {
 				fastCtx.SetStatusCode(fasthttp.StatusInternalServerError)
 				fastCtx.SetBodyString(fmt.Sprintf(`{"jsonrpc":"2.0","error":{"code":-32603,"message":"%s"}}`, err.Error()))
 				return
 			}
 		}
-
-		fastCtx.SetBody(buf.Bytes())
 	}
 }
 
+func (s *HttpServer) parseUrlPath(fctx *fasthttp.RequestCtx) (
+	projectId, architecture, chainId string,
+	isAdmin bool,
+	isHealthCheck bool,
+	err error,
+) {
+	isPost := fctx.IsPost()
+	ps := path.Clean(util.Mem2Str(fctx.Path()))
+	segments := strings.Split(ps, "/")
+
+	if len(segments) != 2 && len(segments) != 3 && len(segments) != 4 {
+		return "", "", "", false, false, common.NewErrInvalidUrlPath(ps)
+	}
+
+	if isPost && len(segments) == 4 {
+		projectId = segments[1]
+		architecture = segments[2]
+		chainId = segments[3]
+	} else if isPost && len(segments) == 3 && segments[2] == "admin" {
+		projectId = segments[1]
+		isAdmin = true
+	} else if len(segments) == 2 && segments[1] == "healthcheck" {
+		isHealthCheck = true
+	} else {
+		return "", "", "", false, false, common.NewErrInvalidUrlPath(ps)
+	}
+
+	return projectId, architecture, chainId, isAdmin, isHealthCheck, nil
+}
+
 func (s *HttpServer) handleCORS(ctx *fasthttp.RequestCtx, corsConfig *common.CORSConfig) bool {
-	origin := string(ctx.Request.Header.Peek("Origin"))
+	origin := util.Mem2Str(ctx.Request.Header.Peek("Origin"))
 	if origin == "" {
 		return true
 	}
 
-	health.MetricCORSRequestsTotal.WithLabelValues(string(ctx.Path()), origin).Inc()
+	health.MetricCORSRequestsTotal.WithLabelValues(util.Mem2Str(ctx.Path()), origin).Inc()
 
 	allowed := false
 	for _, allowedOrigin := range corsConfig.AllowedOrigins {
@@ -307,7 +345,7 @@ func (s *HttpServer) handleCORS(ctx *fasthttp.RequestCtx, corsConfig *common.COR
 
 	if !allowed {
 		s.logger.Debug().Str("origin", origin).Msg("CORS request from disallowed origin")
-		health.MetricCORSDisallowedOriginTotal.WithLabelValues(string(ctx.Path()), origin).Inc()
+		health.MetricCORSDisallowedOriginTotal.WithLabelValues(util.Mem2Str(ctx.Path()), origin).Inc()
 
 		if ctx.IsOptions() {
 			ctx.SetStatusCode(fasthttp.StatusNoContent)
@@ -331,7 +369,7 @@ func (s *HttpServer) handleCORS(ctx *fasthttp.RequestCtx, corsConfig *common.COR
 	}
 
 	if ctx.IsOptions() {
-		health.MetricCORSPreflightRequestsTotal.WithLabelValues(string(ctx.Path()), origin).Inc()
+		health.MetricCORSPreflightRequestsTotal.WithLabelValues(util.Mem2Str(ctx.Path()), origin).Inc()
 		ctx.SetStatusCode(fasthttp.StatusNoContent)
 		return false
 	}
@@ -344,19 +382,26 @@ func setResponseHeaders(res interface{}, fastCtx *fasthttp.RequestCtx) {
 	var ok bool
 	rm, ok = res.(common.ResponseMetadata)
 	if !ok {
-		var jrsp, errObj map[string]interface{}
+		var jrsp map[string]interface{}
+		var hjrsp *HttpJsonRpcErrorResponse
 		if jrsp, ok = res.(map[string]interface{}); ok {
-			if errObj, ok = jrsp["error"].(map[string]interface{}); ok {
-				if err, ok := errObj["cause"].(error); ok {
-					uer := &common.ErrUpstreamsExhausted{}
+			var err error
+			if err, ok = jrsp["cause"].(error); ok {
+				uer := &common.ErrUpstreamsExhausted{}
+				if ok = errors.As(err, &uer); ok {
+					rm = uer
+				} else {
+					uer := &common.ErrUpstreamRequest{}
 					if ok = errors.As(err, &uer); ok {
 						rm = uer
-					} else {
-						uer := &common.ErrUpstreamRequest{}
-						if ok = errors.As(err, &uer); ok {
-							rm = uer
-						}
 					}
+				}
+			}
+		} else if hjrsp, ok = res.(*HttpJsonRpcErrorResponse); ok {
+			if err := hjrsp.Cause; err != nil {
+				uer := &common.ErrUpstreamRequest{}
+				if ok = errors.As(err, &uer); ok {
+					rm = uer
 				}
 			}
 		}
@@ -380,18 +425,23 @@ func setResponseStatusCode(respOrErr interface{}, fastCtx *fasthttp.RequestCtx) 
 	if err, ok := respOrErr.(error); ok {
 		fastCtx.SetStatusCode(decideErrorStatusCode(err))
 	} else if resp, ok := respOrErr.(map[string]interface{}); ok {
-		if errObj, ok := resp["error"].(map[string]interface{}); ok {
-			if cause, ok := errObj["cause"].(error); ok {
-				fastCtx.SetStatusCode(decideErrorStatusCode(cause))
-			} else {
-				fastCtx.SetStatusCode(fasthttp.StatusOK)
-			}
+		if cause, ok := resp["cause"].(error); ok {
+			fastCtx.SetStatusCode(decideErrorStatusCode(cause))
 		} else {
 			fastCtx.SetStatusCode(fasthttp.StatusOK)
 		}
+	} else if hjrsp, ok := respOrErr.(*HttpJsonRpcErrorResponse); ok {
+		fastCtx.SetStatusCode(decideErrorStatusCode(hjrsp.Cause))
 	} else {
 		fastCtx.SetStatusCode(fasthttp.StatusOK)
 	}
+}
+
+type HttpJsonRpcErrorResponse struct {
+	Jsonrpc string      `json:"jsonrpc"`
+	Id      interface{} `json:"id"`
+	Error   interface{} `json:"error"`
+	Cause   error       `json:"-"`
 }
 
 func processErrorBody(logger *zerolog.Logger, nq *common.NormalizedRequest, err error) interface{} {
@@ -426,15 +476,18 @@ func processErrorBody(logger *zerolog.Logger, nq *common.NormalizedRequest, err 
 	}
 	jre := &common.ErrJsonRpcExceptionInternal{}
 	if errors.As(err, &jre) {
-		return map[string]interface{}{
-			"jsonrpc": jsonrpcVersion,
-			"id":      reqId,
-			"error": map[string]interface{}{
-				"code":    jre.NormalizedCode(),
-				"message": jre.Message,
-				"data":    jre.Details["data"],
-				"cause":   err,
-			},
+		errObj := map[string]interface{}{
+			"code":    jre.NormalizedCode(),
+			"message": jre.Message,
+		}
+		if jre.Details["data"] != nil {
+			errObj["data"] = jre.Details["data"]
+		}
+		return &HttpJsonRpcErrorResponse{
+			Jsonrpc: jsonrpcVersion,
+			Id:      reqId,
+			Error:   errObj,
+			Cause:   err,
 		}
 	}
 
@@ -458,7 +511,7 @@ func decideErrorStatusCode(err error) int {
 	return fasthttp.StatusInternalServerError
 }
 
-func handleErrorResponse(logger *zerolog.Logger, nq *common.NormalizedRequest, err error, ctx *fasthttp.RequestCtx, encoder sonic.Encoder, buf *bytes.Buffer) {
+func handleErrorResponse(logger *zerolog.Logger, nq *common.NormalizedRequest, err error, ctx *fasthttp.RequestCtx, encoder sonic.Encoder) {
 	resp := processErrorBody(logger, nq, err)
 	setResponseStatusCode(err, ctx)
 	err = encoder.Encode(resp)
@@ -469,7 +522,6 @@ func handleErrorResponse(logger *zerolog.Logger, nq *common.NormalizedRequest, e
 		ctx.SetBodyString(fmt.Sprintf(`{"jsonrpc":"2.0","error":{"code":-32603,"message":"%s"}}`, err.Error()))
 	} else {
 		ctx.Response.Header.Set("Content-Type", "application/json")
-		ctx.SetBody(buf.Bytes())
 	}
 }
 

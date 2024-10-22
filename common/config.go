@@ -10,8 +10,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var TRUE = true
-var FALSE = false
+var (
+	ErpcVersion   = "dev"
+	ErpcCommitSha = "none"
+	TRUE          = true
+	FALSE         = false
+)
 
 // Config represents the configuration of the application.
 type Config struct {
@@ -375,6 +379,10 @@ func (c *RateLimitRuleConfig) MarshalZerologObject(e *zerolog.Event) {
 }
 
 func (c *NetworkConfig) NetworkId() string {
+	if c.Architecture == "" || c.Evm == nil {
+		return ""
+	}
+
 	switch c.Architecture {
 	case "evm":
 		return util.EvmNetworkId(c.Evm.ChainId)
@@ -439,11 +447,11 @@ func (s *UpstreamConfig) UnmarshalYAML(unmarshal func(interface{}) error) error 
 				BackoffFactor:   1.5,
 			},
 			CircuitBreaker: &CircuitBreakerPolicyConfig{
-				FailureThresholdCount:    80,
-				FailureThresholdCapacity: 100,
+				FailureThresholdCount:    800,
+				FailureThresholdCapacity: 1000,
 				HalfOpenAfter:            "5m",
-				SuccessThresholdCount:    5,
-				SuccessThresholdCapacity: 5,
+				SuccessThresholdCount:    3,
+				SuccessThresholdCapacity: 3,
 			},
 		},
 		RateLimitAutoTune: &RateLimitAutoTuneConfig{
@@ -468,5 +476,43 @@ func (s *UpstreamConfig) UnmarshalYAML(unmarshal func(interface{}) error) error 
 	}
 
 	*s = UpstreamConfig(raw)
+	return nil
+}
+
+var NetworkDefaultFailsafeConfig = &FailsafeConfig{
+	Hedge: &HedgePolicyConfig{
+		Delay:    "200ms",
+		MaxCount: 3,
+	},
+	Retry: &RetryPolicyConfig{
+		MaxAttempts:     3,
+		Delay:           "1s",
+		Jitter:          "500ms",
+		BackoffMaxDelay: "10s",
+		BackoffFactor:   2,
+	},
+	Timeout: &TimeoutPolicyConfig{
+		Duration: "30s",
+	},
+}
+
+func (c *NetworkConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type rawNetworkConfig NetworkConfig
+	raw := rawNetworkConfig{
+		Failsafe: NetworkDefaultFailsafeConfig,
+	}
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+
+	if raw.Architecture == "" {
+		return NewErrInvalidConfig("network.*.architecture is required")
+	}
+
+	if raw.Architecture == "evm" && raw.Evm == nil {
+		return NewErrInvalidConfig("network.*.evm is required for evm networks")
+	}
+
+	*c = NetworkConfig(raw)
 	return nil
 }

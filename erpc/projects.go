@@ -3,11 +3,9 @@ package erpc
 import (
 	"context"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
-	// "time"
 
 	"github.com/erpc/erpc/auth"
 	"github.com/erpc/erpc/common"
@@ -74,11 +72,11 @@ func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *com
 	if err != nil {
 		return nil, err
 	}
-	method, _ := nq.Method()
-
 	if err := p.acquireRateLimitPermit(nq); err != nil {
 		return nil, err
 	}
+
+	method, _ := nq.Method()
 
 	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
 		health.MetricNetworkRequestDuration.WithLabelValues(
@@ -90,7 +88,7 @@ func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *com
 	defer timer.ObserveDuration()
 
 	health.MetricNetworkRequestsReceived.WithLabelValues(p.Config.Id, network.NetworkId, method).Inc()
-	lg := p.Logger.With().Str("method", method).Str("id", nq.Id()).Str("ptr", fmt.Sprintf("%p", nq)).Logger()
+	lg := p.Logger.With().Str("method", method).Int64("id", nq.Id()).Str("ptr", fmt.Sprintf("%p", nq)).Logger()
 	lg.Debug().Msgf("forwarding request to network")
 	resp, err := network.Forward(ctx, nq)
 
@@ -127,27 +125,8 @@ func (p *PreparedProject) initializeNetwork(networkId string) (*Network, error) 
 	}
 
 	if nwCfg == nil {
-		allUps, err := p.upstreamsRegistry.GetSortedUpstreams(networkId, "*")
-		if err != nil {
-			return nil, err
-		}
 		nwCfg = &common.NetworkConfig{
-			Failsafe: &common.FailsafeConfig{
-				Hedge: &common.HedgePolicyConfig{
-					Delay:    "200ms",
-					MaxCount: 3,
-				},
-				Retry: &common.RetryPolicyConfig{
-					MaxAttempts:     int(math.Min(float64(len(allUps)), 3)),
-					Delay:           "1s",
-					Jitter:          "500ms",
-					BackoffMaxDelay: "10s",
-					BackoffFactor:   2,
-				},
-				Timeout: &common.TimeoutPolicyConfig{
-					Duration: "30s",
-				},
-			},
+			Failsafe: common.NetworkDefaultFailsafeConfig,
 		}
 
 		s := strings.Split(networkId, ":")

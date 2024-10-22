@@ -22,8 +22,8 @@ type Network struct {
 	ProjectId string
 	Logger    *zerolog.Logger
 
-	inFlightMutex    *sync.Mutex
-	inFlightRequests map[string]*Multiplexer
+	inFlightRequests *sync.Map
+	evmStatePollers  map[string]*upstream.EvmStatePoller
 
 	failsafePolicies     []failsafe.Policy[*common.NormalizedResponse]
 	failsafeExecutor     failsafe.Executor[*common.NormalizedResponse]
@@ -31,8 +31,6 @@ type Network struct {
 	cacheDal             data.CacheDAL
 	metricsTracker       *health.Tracker
 	upstreamsRegistry    *upstream.UpstreamsRegistry
-
-	evmStatePollers map[string]*upstream.EvmStatePoller
 }
 
 func (n *Network) Bootstrap(ctx context.Context) error {
@@ -78,17 +76,15 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 	req.SetNetwork(n)
 
 	method, _ := req.Method()
-	lg := n.Logger.With().Str("method", method).Str("id", req.Id()).Str("ptr", fmt.Sprintf("%p", req)).Logger()
+	lg := n.Logger.With().Str("method", method).Int64("id", req.Id()).Str("ptr", fmt.Sprintf("%p", req)).Logger()
 
 	// 1) In-flight multiplexing
 	var inf *Multiplexer
 	mlxHash, err := req.CacheHash()
 	if err == nil && mlxHash != "" {
-		n.inFlightMutex.Lock()
-		var exists bool
-		if inf, exists = n.inFlightRequests[mlxHash]; exists {
-			n.inFlightMutex.Unlock()
-			lg.Debug().Msgf("found similar in-flight request, waiting for result")
+		if vinf, exists := n.inFlightRequests.Load(mlxHash); exists {
+			inf = vinf.(*Multiplexer)
+			lg.Debug().Str("mlx", mlxHash).Msgf("found similar in-flight request, waiting for result")
 			health.MetricNetworkMultiplexedRequests.WithLabelValues(n.ProjectId, n.NetworkId, method).Inc()
 
 			inf.mu.RLock()
@@ -110,6 +106,8 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 				}
 				return resp, inf.err
 			case <-ctx.Done():
+				n.inFlightRequests.Delete(mlxHash)
+
 				err := ctx.Err()
 				if errors.Is(err, context.DeadlineExceeded) {
 					return nil, common.NewErrNetworkRequestTimeout(time.Since(startTime))
@@ -119,13 +117,13 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			}
 		}
 		inf = NewMultiplexer()
-		n.inFlightRequests[mlxHash] = inf
-		n.inFlightMutex.Unlock()
 		defer func() {
-			n.inFlightMutex.Lock()
-			defer n.inFlightMutex.Unlock()
-			delete(n.inFlightRequests, mlxHash)
+			if r := recover(); r != nil {
+				lg.Error().Msgf("panic in multiplexer cleanup: %v", r)
+			}
+			n.inFlightRequests.Delete(mlxHash)
 		}()
+		n.inFlightRequests.Store(mlxHash, inf)
 	}
 
 	// 2) Get from cache if exists
@@ -204,9 +202,11 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 	var execution failsafe.Execution[*common.NormalizedResponse]
 	var errorsByUpstream = map[string]error{}
 
+	ectx := context.WithValue(ctx, common.RequestContextKey, req)
+
 	i := 0
 	resp, execErr := n.failsafeExecutor.
-		WithContext(ctx).
+		WithContext(ectx).
 		GetWithExecution(func(exec failsafe.Execution[*common.NormalizedResponse]) (*common.NormalizedResponse, error) {
 			req.Lock()
 			execution = exec
@@ -218,6 +218,9 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			// Upstream-level retry is handled by the upstream itself (and its own failsafe policies).
 			ln := len(upsList)
 			for count := 0; count < ln; count++ {
+				if err := exec.Context().Err(); err != nil {
+					return nil, err
+				}
 				// We need to use write-lock here because "i" is being updated.
 				req.Lock()
 				u := upsList[i]
@@ -239,15 +242,18 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 
 				ulg := lg.With().Str("upstreamId", u.Config().Id).Logger()
 
-				rp, er := tryForward(u, exec.Context(), &ulg)
-				resp, err := n.normalizeResponse(req, rp, er)
+				resp, err := tryForward(u, exec.Context(), &ulg)
+				if e := n.normalizeResponse(req, resp); e != nil {
+					ulg.Error().Err(e).Msgf("failed to normalize response")
+					err = e
+				}
 
-				isClientErr := err != nil && common.HasErrorCode(err, common.ErrCodeEndpointClientSideException)
+				isClientErr := common.IsClientError(err)
 				isHedged := exec.Hedges() > 0
 
-				if isHedged && err != nil && errors.Is(err, context.Canceled) {
+				if isHedged && (err != nil && errors.Is(err, context.Canceled)) {
 					ulg.Debug().Err(err).Msgf("discarding hedged request to upstream")
-					return nil, common.NewErrUpstreamHedgeCancelled(u.Config().Id)
+					return nil, common.NewErrUpstreamHedgeCancelled(u.Config().Id, context.Cause(exec.Context()))
 				}
 				if isHedged {
 					ulg.Debug().Msgf("forwarded hedged request to upstream")
@@ -334,7 +340,9 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		}
 
 		if n.cacheDal != nil {
+			resp.RLock()
 			go (func(resp *common.NormalizedResponse) {
+				defer resp.RUnlock()
 				c, cancel := context.WithTimeoutCause(context.Background(), 10*time.Second, errors.New("cache driver timeout during set"))
 				defer cancel()
 				err := n.cacheDal.Set(c, req, resp)
@@ -355,6 +363,10 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 }
 
 func (n *Network) EvmIsBlockFinalized(blockNumber int64) (bool, error) {
+	if n == nil || n.evmStatePollers == nil || len(n.evmStatePollers) == 0 {
+		return false, nil
+	}
+
 	for _, poller := range n.evmStatePollers {
 		if fin, err := poller.IsBlockFinalized(blockNumber); err != nil {
 			if common.HasErrorCode(err, common.ErrCodeFinalizedBlockUnavailable) {
@@ -399,22 +411,16 @@ func (n *Network) enrichStatePoller(method string, req *common.NormalizedRequest
 			if blkTag, ok := jrq.Params[0].(string); ok {
 				if blkTag == "finalized" || blkTag == "latest" {
 					jrs, _ := resp.JsonRpcResponse()
-					if jrs != nil {
-						res, err := jrs.ParsedResult()
+					bnh, err := jrs.PeekStringByPath("number")
+					if err == nil {
+						blockNumber, err := common.HexToInt64(bnh)
 						if err == nil {
-							blk, ok := res.(map[string]interface{})
+							poller, ok := n.evmStatePollers[resp.Upstream().Config().Id]
 							if ok {
-								bnh, ok := blk["number"].(string)
-								if ok {
-									blockNumber, err := common.HexToInt64(bnh)
-									if err == nil {
-										poller := n.evmStatePollers[resp.Upstream().Config().Id]
-										if blkTag == "finalized" {
-											poller.SuggestFinalizedBlock(blockNumber)
-										} else if blkTag == "latest" {
-											poller.SuggestLatestBlock(blockNumber)
-										}
-									}
+								if blkTag == "finalized" {
+									poller.SuggestFinalizedBlock(blockNumber)
+								} else if blkTag == "latest" {
+									poller.SuggestLatestBlock(blockNumber)
 								}
 							}
 						}
@@ -425,47 +431,26 @@ func (n *Network) enrichStatePoller(method string, req *common.NormalizedRequest
 	}
 }
 
-func (n *Network) normalizeResponse(req *common.NormalizedRequest, resp *common.NormalizedResponse, err error) (*common.NormalizedResponse, error) {
+func (n *Network) normalizeResponse(req *common.NormalizedRequest, resp *common.NormalizedResponse) error {
 	switch n.Architecture() {
 	case common.ArchitectureEvm:
 		if resp != nil {
 			// This ensures that even if upstream gives us wrong/missing ID we'll
 			// use correct one from original incoming request.
-			jrr, _ := resp.JsonRpcResponse()
-			if jrr != nil {
-				jrq, _ := req.JsonRpcRequest()
-				if jrq != nil {
-					jrr.ID = jrq.ID
+			if jrr, err := resp.JsonRpcResponse(); err == nil {
+				jrq, err := req.JsonRpcRequest()
+				if err != nil {
+					return err
+				}
+				err = jrr.SetID(jrq.ID)
+				if err != nil {
+					return err
 				}
 			}
 		}
-
-		if err == nil {
-			return resp, nil
-		}
-
-		if common.HasErrorCode(err, common.ErrCodeJsonRpcExceptionInternal) {
-			return resp, err
-		} else if common.HasErrorCode(err, common.ErrCodeJsonRpcRequestUnmarshal) {
-			return resp, common.NewErrJsonRpcExceptionInternal(
-				0,
-				common.JsonRpcErrorParseException,
-				"failed to parse json-rpc request",
-				err,
-				nil,
-			)
-		}
-
-		return resp, common.NewErrJsonRpcExceptionInternal(
-			0,
-			common.JsonRpcErrorServerSideException,
-			fmt.Sprintf("failed request on evm network %s", n.NetworkId),
-			err,
-			nil,
-		)
-	default:
-		return resp, err
 	}
+
+	return nil
 }
 
 func (n *Network) acquireRateLimitPermit(req *common.NormalizedRequest) error {

@@ -2,14 +2,17 @@ package common
 
 import (
 	"fmt"
-	"math"
-	"math/rand"
+	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/bytedance/sonic"
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 	"github.com/valyala/fasthttp"
 )
+
+const RequestContextKey ContextKey = "request"
 
 type RequestDirectives struct {
 	// Instruct the proxy to retry if response from the upstream appears to be empty
@@ -38,18 +41,16 @@ type RequestDirectives struct {
 type NormalizedRequest struct {
 	sync.RWMutex
 
-	Attempt int
-
 	network Network
 	body    []byte
 
-	uid            string
+	uid            atomic.Value
 	method         string
 	directives     *RequestDirectives
 	jsonRpcRequest *JsonRpcRequest
 
-	lastValidResponse *NormalizedResponse
-	lastUpstream      Upstream
+	lastValidResponse atomic.Pointer[NormalizedResponse]
+	lastUpstream      atomic.Value
 }
 
 type UniqueRequestKey struct {
@@ -70,9 +71,7 @@ func (r *NormalizedRequest) SetLastUpstream(upstream Upstream) *NormalizedReques
 	if r == nil {
 		return r
 	}
-	r.Lock()
-	defer r.Unlock()
-	r.lastUpstream = upstream
+	r.lastUpstream.Store(upstream)
 	return r
 }
 
@@ -80,27 +79,24 @@ func (r *NormalizedRequest) LastUpstream() Upstream {
 	if r == nil {
 		return nil
 	}
-	r.Lock()
-	defer r.Unlock()
-	return r.lastUpstream
+	if lu := r.lastUpstream.Load(); lu != nil {
+		return lu.(Upstream)
+	}
+	return nil
 }
 
 func (r *NormalizedRequest) SetLastValidResponse(response *NormalizedResponse) {
 	if r == nil {
 		return
 	}
-	r.Lock()
-	defer r.Unlock()
-	r.lastValidResponse = response
+	r.lastValidResponse.Store(response)
 }
 
 func (r *NormalizedRequest) LastValidResponse() *NormalizedResponse {
 	if r == nil {
 		return nil
 	}
-	r.RLock()
-	defer r.RUnlock()
-	return r.lastValidResponse
+	return r.lastValidResponse.Load()
 }
 
 func (r *NormalizedRequest) Network() Network {
@@ -110,62 +106,44 @@ func (r *NormalizedRequest) Network() Network {
 	return r.network
 }
 
-func (r *NormalizedRequest) Id() string {
+func (r *NormalizedRequest) Id() int64 {
 	if r == nil {
-		return ""
+		return 0
 	}
 
-	if r.uid != "" {
-		return r.uid
-	}
-
-	r.RLock()
 	if r.jsonRpcRequest != nil {
-		defer r.RUnlock()
-		if id, ok := r.jsonRpcRequest.ID.(string); ok {
-			r.uid = id
-			return id
-		} else if id, ok := r.jsonRpcRequest.ID.(float64); ok {
-			r.uid = fmt.Sprintf("%d", int64(id))
-			return r.uid
-		} else {
-			r.uid = fmt.Sprintf("%v", r.jsonRpcRequest.ID)
-			return r.uid
-		}
-	}
-	r.RUnlock()
-
-	r.Lock()
-	defer r.Unlock()
-
-	if r.uid != "" {
-		return r.uid
+		return r.jsonRpcRequest.ID
 	}
 
 	if len(r.body) > 0 {
 		idnode, err := sonic.Get(r.body, "id")
 		if err == nil {
 			ids, err := idnode.String()
-			if err == nil {
+			if err != nil {
 				idf, err := idnode.Float64()
 				if err != nil {
 					idn, err := idnode.Int64()
 					if err != nil {
-						r.uid = fmt.Sprintf("%d", idn)
-						return r.uid
+						r.uid.Store(idn)
+						return idn
 					}
 				} else {
-					r.uid = fmt.Sprintf("%d", int64(idf))
-					return r.uid
+					uid := int64(idf)
+					r.uid.Store(uid)
+					return uid
 				}
 			} else {
-				r.uid = ids
+				uid, err := strconv.ParseInt(ids, 0, 64)
+				if err != nil {
+					uid = 0
+				}
+				r.uid.Store(uid)
+				return uid
 			}
-			return r.uid
 		}
 	}
 
-	return ""
+	return 0
 }
 
 func (r *NormalizedRequest) NetworkId() string {
@@ -185,25 +163,25 @@ func (r *NormalizedRequest) ApplyDirectivesFromHttp(
 	queryArgs *fasthttp.Args,
 ) {
 	drc := &RequestDirectives{
-		RetryEmpty:    string(headers.Peek("X-ERPC-Retry-Empty")) != "false",
-		RetryPending:  string(headers.Peek("X-ERPC-Retry-Pending")) != "false",
-		SkipCacheRead: string(headers.Peek("X-ERPC-Skip-Cache-Read")) == "true",
-		UseUpstream:   string(headers.Peek("X-ERPC-Use-Upstream")),
+		RetryEmpty:    util.Mem2Str(headers.Peek("X-ERPC-Retry-Empty")) != "false",
+		RetryPending:  util.Mem2Str(headers.Peek("X-ERPC-Retry-Pending")) != "false",
+		SkipCacheRead: util.Mem2Str(headers.Peek("X-ERPC-Skip-Cache-Read")) == "true",
+		UseUpstream:   util.Mem2Str(headers.Peek("X-ERPC-Use-Upstream")),
 	}
 
-	if useUpstream := string(queryArgs.Peek("use-upstream")); useUpstream != "" {
+	if useUpstream := util.Mem2Str(queryArgs.Peek("use-upstream")); useUpstream != "" {
 		drc.UseUpstream = useUpstream
 	}
 
-	if retryEmpty := string(queryArgs.Peek("retry-empty")); retryEmpty != "" {
+	if retryEmpty := util.Mem2Str(queryArgs.Peek("retry-empty")); retryEmpty != "" {
 		drc.RetryEmpty = retryEmpty != "false"
 	}
 
-	if retryPending := string(queryArgs.Peek("retry-pending")); retryPending != "" {
+	if retryPending := util.Mem2Str(queryArgs.Peek("retry-pending")); retryPending != "" {
 		drc.RetryPending = retryPending != "false"
 	}
 
-	if skipCacheRead := string(queryArgs.Peek("skip-cache-read")); skipCacheRead != "" {
+	if skipCacheRead := util.Mem2Str(queryArgs.Peek("skip-cache-read")); skipCacheRead != "" {
 		drc.SkipCacheRead = skipCacheRead != "false"
 	}
 
@@ -249,21 +227,13 @@ func (r *NormalizedRequest) JsonRpcRequest() (*JsonRpcRequest, error) {
 	}
 
 	rpcReq := new(JsonRpcRequest)
-	if err := sonic.Unmarshal(r.body, rpcReq); err != nil {
+	if err := SonicCfg.Unmarshal(r.body, rpcReq); err != nil {
 		return nil, NewErrJsonRpcRequestUnmarshal(err)
 	}
 
 	method := rpcReq.Method
 	if method == "" {
 		return nil, NewErrJsonRpcRequestUnresolvableMethod(rpcReq)
-	}
-
-	if rpcReq.JSONRPC == "" {
-		rpcReq.JSONRPC = "2.0"
-	}
-
-	if rpcReq.ID == nil {
-		rpcReq.ID = rand.Intn(math.MaxInt32) // #nosec G404
 	}
 
 	r.jsonRpcRequest = rpcReq
@@ -284,8 +254,7 @@ func (r *NormalizedRequest) Method() (string, error) {
 	if len(r.body) > 0 {
 		method, err := sonic.Get(r.body, "method")
 		if err != nil {
-			r.method = "n/a"
-			return r.method, err
+			return "", NewErrJsonRpcRequestUnmarshal(err)
 		}
 		m, err := method.String()
 		r.method = m
@@ -304,7 +273,7 @@ func (r *NormalizedRequest) MarshalZerologObject(e *zerolog.Event) {
 		if r.jsonRpcRequest != nil {
 			e.Object("jsonRpc", r.jsonRpcRequest)
 		} else if r.body != nil {
-			e.Str("body", string(r.body))
+			e.Str("body", util.Mem2Str(r.body))
 		}
 	}
 }
@@ -326,11 +295,12 @@ func (r *NormalizedRequest) EvmBlockNumber() (int64, error) {
 		return bn, nil
 	}
 
-	if r.lastValidResponse == nil {
+	lvr := r.lastValidResponse.Load()
+	if lvr == nil {
 		return 0, nil
 	}
 
-	bn, err = r.lastValidResponse.EvmBlockNumber()
+	bn, err = lvr.EvmBlockNumber()
 	if err != nil {
 		return 0, err
 	}
@@ -344,11 +314,13 @@ func (r *NormalizedRequest) MarshalJSON() ([]byte, error) {
 	}
 
 	if r.jsonRpcRequest != nil {
-		return sonic.Marshal(r.jsonRpcRequest)
+		return SonicCfg.Marshal(map[string]interface{}{
+			"method": r.jsonRpcRequest.Method,
+		})
 	}
 
 	if m, _ := r.Method(); m != "" {
-		return sonic.Marshal(map[string]interface{}{
+		return SonicCfg.Marshal(map[string]interface{}{
 			"method": m,
 		})
 	}

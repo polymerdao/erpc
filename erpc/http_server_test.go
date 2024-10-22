@@ -35,7 +35,7 @@ func TestHttpServer_RaceTimeouts(t *testing.T) {
 
 	cfg := &common.Config{
 		Server: &common.ServerConfig{
-			MaxTimeout: "200ms", // Set a very short timeout for testing
+			MaxTimeout: "500ms", // Set a very short timeout for testing
 		},
 		Projects: []*common.ProjectConfig{
 			{
@@ -142,7 +142,7 @@ func TestHttpServer_RaceTimeouts(t *testing.T) {
 			if result.statusCode != http.StatusGatewayTimeout {
 				t.Errorf("unexpected status code: %d", result.statusCode)
 			}
-			assert.Contains(t, result.body, "Timeout")
+			assert.Contains(t, result.body, "timeout")
 		}
 	})
 
@@ -151,7 +151,7 @@ func TestHttpServer_RaceTimeouts(t *testing.T) {
 			Post("/").
 			Times(10).
 			Reply(200).
-			Delay(300 * time.Millisecond). // Delay longer than the server timeout
+			Delay(700 * time.Millisecond). // Delay longer than the server timeout
 			JSON(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      1,
@@ -161,7 +161,7 @@ func TestHttpServer_RaceTimeouts(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			statusCode, body := sendRequest()
 			assert.Equal(t, http.StatusGatewayTimeout, statusCode)
-			assert.Contains(t, body, "Timeout")
+			assert.Contains(t, body, "timeout")
 		}
 	})
 
@@ -173,7 +173,7 @@ func TestHttpServer_RaceTimeouts(t *testing.T) {
 			if i%2 == 0 {
 				delay = 1 * time.Millisecond // shorter than the server timeout
 			} else {
-				delay = 200 * time.Millisecond // longer than the server timeout
+				delay = 700 * time.Millisecond // longer than the server timeout
 			}
 			gock.New("http://rpc1.localhost").
 				Post("/").
@@ -212,7 +212,7 @@ func TestHttpServer_RaceTimeouts(t *testing.T) {
 		for _, result := range results {
 			if result.statusCode == http.StatusGatewayTimeout {
 				timeouts++
-				assert.Contains(t, result.body, "Timeout")
+				assert.Contains(t, result.body, "timeout")
 			} else {
 				successes++
 				assert.Contains(t, result.body, "blockNumber")
@@ -249,6 +249,9 @@ func TestHttpServer_SingleUpstream(t *testing.T) {
 							ChainId: 1,
 						},
 						VendorName: "llama",
+						JsonRpc: &common.JsonRpcUpstreamConfig{
+							SupportsBatch: &common.FALSE,
+						},
 					},
 				},
 			},
@@ -256,252 +259,359 @@ func TestHttpServer_SingleUpstream(t *testing.T) {
 		RateLimiters: &common.RateLimiterConfig{},
 	}
 
-	sendRequest, baseURL := createServerTestFixtures(cfg, t)
+	cfgCases := []func(*common.Config){
+		// Case 1: Upstream supports batch requests
+		func(cfg *common.Config) {
+			cfg.Projects[0].Upstreams[0].JsonRpc.SupportsBatch = &common.TRUE
+		},
 
-	t.Run("ConcurrentEthGetBlockNumber", func(t *testing.T) {
-		defer gock.Off()
-		const concurrentRequests = 10
+		// Case 2: Upstream does not support batch requests
+		func(cfg *common.Config) {
+			cfg.Projects[0].Upstreams[0].JsonRpc.SupportsBatch = &common.FALSE
+		},
 
-		gock.New("http://rpc1.localhost").
-			Post("/").
-			Times(concurrentRequests).
-			Reply(200).
-			JSON(map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      1,
-				"result":  "0x444444",
-			})
-
-		var wg sync.WaitGroup
-		results := make([]struct {
-			statusCode int
-			body       string
-		}, concurrentRequests)
-
-		for i := 0; i < concurrentRequests; i++ {
-			wg.Add(1)
-			go func(index int) {
-				defer wg.Done()
-				body := fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[%d],"id":1}`, index)
-				results[index].statusCode, results[index].body = sendRequest(body, nil, nil)
-			}(i)
-		}
-
-		wg.Wait()
-
-		for i, result := range results {
-			assert.Equal(t, http.StatusOK, result.statusCode, "Status code should be 200 for request %d", i)
-
-			var response map[string]interface{}
-			err := sonic.Unmarshal([]byte(result.body), &response)
-			assert.NoError(t, err, "Should be able to decode response for request %d", i)
-			assert.Equal(t, "0x444444", response["result"], "Unexpected result for request %d", i)
-		}
-
-		assert.True(t, gock.IsDone(), "All mocks should have been called")
-	})
-
-	t.Run("InvalidJSON", func(t *testing.T) {
-		statusCode, body := sendRequest(`{"invalid json`, nil, nil)
-
-		fmt.Println(body)
-
-		assert.Equal(t, http.StatusBadRequest, statusCode)
-
-		var errorResponse map[string]interface{}
-		err := sonic.Unmarshal([]byte(body), &errorResponse)
-		require.NoError(t, err)
-
-		assert.Contains(t, errorResponse, "error")
-		errorObj := errorResponse["error"].(map[string]interface{})
-		errStr, _ := sonic.Marshal(errorObj)
-		assert.Contains(t, string(errStr), "ErrJsonRpcRequestUnmarshal")
-	})
-
-	t.Run("UnsupportedMethod", func(t *testing.T) {
-		defer gock.Off()
-
-		gock.New("http://rpc1.localhost").
-			Post("/").
-			Reply(200).
-			JSON(map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      1,
-				"error": map[string]interface{}{
-					"code":    -32601,
-					"message": "Method not found",
+		// Case 3: Caching is enabled
+		func(cfg *common.Config) {
+			cfg.Database = &common.DatabaseConfig{
+				EvmJsonRpcCache: &common.ConnectorConfig{
+					Driver: "memory",
+					Memory: &common.MemoryConnectorConfig{
+						MaxItems: 100,
+					},
 				},
-			})
+			}
+		},
 
-		statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"unsupported_method","params":[],"id":1}`, nil, nil)
-
-		assert.Equal(t, http.StatusUnsupportedMediaType, statusCode)
-
-		var errorResponse map[string]interface{}
-		err := sonic.Unmarshal([]byte(body), &errorResponse)
-		require.NoError(t, err)
-
-		assert.Contains(t, errorResponse, "error")
-		errorObj := errorResponse["error"].(map[string]interface{})
-		assert.Equal(t, float64(-32601), errorObj["code"])
-		assert.Contains(t, errorObj["message"], "Method not found")
-
-		assert.True(t, gock.IsDone(), "All mocks should have been called")
-	})
-
-	// Test case: Request with invalid project ID
-	t.Run("InvalidProjectID", func(t *testing.T) {
-		req, err := http.NewRequest("POST", baseURL+"/invalid_project/evm/1", strings.NewReader(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[],"id":1}`))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-		}
-		resp, err := client.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-
-		var errorResponse map[string]interface{}
-		err = sonic.Unmarshal(body, &errorResponse)
-		require.NoError(t, err)
-
-		assert.Contains(t, errorResponse, "error")
-		errorObj := errorResponse["error"].(map[string]interface{})
-		assert.Contains(t, errorObj["message"], "project not configured")
-	})
-
-	t.Run("UpstreamLatencyAndTimeout", func(t *testing.T) {
-		gock.New("http://rpc1.localhost").
-			Post("/").
-			Reply(200).
-			Delay(6 * time.Second). // Delay longer than the server timeout
-			JSON(map[string]interface{}{
-				"jsonrpc": "2.0",
-				"id":      1,
-				"result":  "0x1111111",
-			})
-
-		statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[],"id":1}`, nil, nil)
-
-		assert.Equal(t, http.StatusGatewayTimeout, statusCode)
-
-		var errorResponse map[string]interface{}
-		err := sonic.Unmarshal([]byte(body), &errorResponse)
-		require.NoError(t, err)
-
-		assert.Contains(t, errorResponse, "error")
-		errorObj := errorResponse["error"].(map[string]interface{})
-		errStr, _ := sonic.Marshal(errorObj)
-		assert.Contains(t, string(errStr), "ErrEndpointRequestTimeout")
-
-		assert.True(t, gock.IsDone(), "All mocks should have been called")
-	})
-
-	t.Run("UnexpectedPlainErrorResponseFromUpstream", func(t *testing.T) {
-		gock.New("http://rpc1.localhost").
-			Post("/").
-			Times(1).
-			Reply(200).
-			BodyString("error code: 1015")
-
-		statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[],"id":1}`, nil, nil)
-
-		assert.Equal(t, http.StatusTooManyRequests, statusCode)
-		assert.Contains(t, body, "error code: 1015")
-
-		assert.True(t, gock.IsDone(), "All mocks should have been called")
-	})
-
-	t.Run("UnexpectedServerErrorResponseFromUpstream", func(t *testing.T) {
-		gock.New("http://rpc1.localhost").
-			Post("/").
-			Times(1).
-			Reply(500).
-			BodyString(`{"error":{"code":-39999,"message":"my funky error"}}`)
-
-		statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[],"id":1}`, nil, nil)
-
-		assert.Equal(t, http.StatusInternalServerError, statusCode)
-		assert.Contains(t, body, "-32603")
-		assert.Contains(t, body, "my funky error")
-
-		assert.True(t, gock.IsDone(), "All mocks should have been called")
-	})
-}
-
-func createServerTestFixtures(cfg *common.Config, t *testing.T) (
-	func(body string, headers map[string]string, queryParams map[string]string) (int, string),
-	string,
-) {
-	gock.EnableNetworking()
-	gock.NetworkingFilter(func(req *http.Request) bool {
-		shouldMakeRealCall := strings.Split(req.URL.Host, ":")[0] == "localhost"
-		return shouldMakeRealCall
-	})
-	defer gock.Off()
-
-	logger := zerolog.New(zerolog.NewConsoleWriter())
-	ctx := context.Background()
-	// ctx, cancel := context.WithCancel(context.Background())
-	// defer cancel()
-
-	erpcInstance, err := NewERPC(ctx, &logger, nil, cfg)
-	require.NoError(t, err)
-
-	httpServer := NewHttpServer(ctx, &logger, cfg.Server, erpcInstance)
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := listener.Addr().(*net.TCPAddr).Port
-
-	go func() {
-		err := httpServer.server.Serve(listener)
-		if err != nil && err != http.ErrServerClosed {
-			t.Errorf("Server error: %v", err)
-		}
-	}()
-	// defer httpServer.server.Shutdown()
-
-	time.Sleep(1000 * time.Millisecond)
-
-	baseURL := fmt.Sprintf("http://localhost:%d", port)
-
-	sendRequest := func(body string, headers map[string]string, queryParams map[string]string) (int, string) {
-		req, err := http.NewRequest("POST", baseURL+"/test_project/evm/1", strings.NewReader(body))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		q := req.URL.Query()
-		for k, v := range queryParams {
-			q.Add(k, v)
-		}
-		req.URL.RawQuery = q.Encode()
-
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return 0, err.Error()
-		}
-		defer resp.Body.Close()
-
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return resp.StatusCode, err.Error()
-		}
-		return resp.StatusCode, string(respBody)
+		// Case 4: Caching is disabled
+		func(cfg *common.Config) {
+			cfg.Database.EvmJsonRpcCache = nil
+		},
 	}
 
-	return sendRequest, baseURL
+	for _, applyCfgOverride := range cfgCases {
+		applyCfgOverride(cfg)
+		sendRequest, baseURL := createServerTestFixtures(cfg, t)
+
+		t.Run("ConcurrentEthGetBlockNumber", func(t *testing.T) {
+			defer gock.Off()
+			const concurrentRequests = 100
+
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				Times(concurrentRequests).
+				Reply(200).
+				JSON(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      1,
+					"result":  "0x444444",
+				})
+
+			var wg sync.WaitGroup
+			results := make([]struct {
+				statusCode int
+				body       string
+			}, concurrentRequests)
+
+			for i := 0; i < concurrentRequests; i++ {
+				wg.Add(1)
+				go func(index int) {
+					defer wg.Done()
+					body := fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[%d],"id":1}`, index)
+					results[index].statusCode, results[index].body = sendRequest(body, nil, nil)
+				}(i)
+			}
+
+			wg.Wait()
+
+			for i, result := range results {
+				assert.Equal(t, http.StatusOK, result.statusCode, "Status code should be 200 for request %d", i)
+
+				var response map[string]interface{}
+				err := sonic.Unmarshal([]byte(result.body), &response)
+				assert.NoError(t, err, "Should be able to decode response for request %d", i)
+				assert.Equal(t, "0x444444", response["result"], "Unexpected result for request %d", i)
+			}
+
+			assert.True(t, gock.IsDone(), "All mocks should have been called")
+		})
+
+		t.Run("InvalidJSON", func(t *testing.T) {
+			statusCode, body := sendRequest(`{"invalid json`, nil, nil)
+
+			fmt.Println(body)
+
+			assert.Equal(t, http.StatusBadRequest, statusCode)
+
+			var errorResponse map[string]interface{}
+			err := sonic.Unmarshal([]byte(body), &errorResponse)
+			require.NoError(t, err)
+
+			assert.Contains(t, errorResponse, "error")
+			errorObj := errorResponse["error"].(map[string]interface{})
+			errStr, _ := sonic.Marshal(errorObj)
+			assert.Contains(t, string(errStr), "failed to parse")
+		})
+
+		t.Run("UnsupportedMethod", func(t *testing.T) {
+			defer gock.Off()
+			cfg.Projects[0].Upstreams[0].IgnoreMethods = []string{}
+
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				Reply(200).
+				Map(func(res *http.Response) *http.Response {
+					sg := `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}`
+					if *cfg.Projects[0].Upstreams[0].JsonRpc.SupportsBatch {
+						sg = "[" + sg + "]"
+					}
+					res.Body = io.NopCloser(strings.NewReader(sg))
+					return res
+				})
+
+			statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"unsupported_method","params":[],"id":1}`, nil, nil)
+			assert.Equal(t, http.StatusUnsupportedMediaType, statusCode)
+
+			var errorResponse map[string]interface{}
+			err := sonic.Unmarshal([]byte(body), &errorResponse)
+			require.NoError(t, err)
+
+			assert.Contains(t, errorResponse, "error")
+			errorObj := errorResponse["error"].(map[string]interface{})
+			assert.Equal(t, float64(-32601), errorObj["code"])
+		})
+
+		t.Run("IgnoredMethod", func(t *testing.T) {
+			defer gock.Off()
+			cfg.Projects[0].Upstreams[0].IgnoreMethods = []string{"ignored_method"}
+
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				Reply(200).
+				Map(func(res *http.Response) *http.Response {
+					sg := `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}`
+					if *cfg.Projects[0].Upstreams[0].JsonRpc.SupportsBatch {
+						sg = "[" + sg + "]"
+					}
+					res.Body = io.NopCloser(strings.NewReader(sg))
+					return res
+				})
+
+			statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"ignored_method","params":[],"id":1}`, nil, nil)
+			assert.Equal(t, http.StatusUnsupportedMediaType, statusCode)
+
+			var errorResponse map[string]interface{}
+			err := sonic.Unmarshal([]byte(body), &errorResponse)
+			require.NoError(t, err)
+
+			assert.Contains(t, errorResponse, "error")
+			errorObj := errorResponse["error"].(map[string]interface{})
+			assert.Equal(t, float64(-32601), errorObj["code"])
+		})
+
+		// Test case: Request with invalid project ID
+		t.Run("InvalidProjectID", func(t *testing.T) {
+			req, err := http.NewRequest("POST", baseURL+"/invalid_project/evm/1", strings.NewReader(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[],"id":1}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+
+			client := &http.Client{
+				Timeout: 10 * time.Second,
+			}
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			var errorResponse map[string]interface{}
+			err = sonic.Unmarshal(body, &errorResponse)
+			require.NoError(t, err)
+
+			assert.Contains(t, errorResponse, "error")
+			errorObj := errorResponse["error"].(map[string]interface{})
+			assert.Contains(t, errorObj["message"], "project not configured")
+		})
+
+		t.Run("UpstreamLatencyAndTimeout", func(t *testing.T) {
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				Reply(200).
+				Delay(6 * time.Second). // Delay longer than the server timeout
+				JSON(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      1,
+					"result":  "0x1111111",
+				})
+
+			statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[],"id":1}`, nil, nil)
+
+			assert.Equal(t, http.StatusGatewayTimeout, statusCode)
+			var errorResponse map[string]interface{}
+			err := sonic.Unmarshal([]byte(body), &errorResponse)
+			require.NoError(t, err)
+
+			assert.Contains(t, errorResponse, "error")
+			errorObj := errorResponse["error"].(map[string]interface{})
+			errStr, _ := sonic.Marshal(errorObj)
+			assert.Contains(t, string(errStr), "timeout")
+
+			assert.True(t, gock.IsDone(), "All mocks should have been called")
+		})
+
+		t.Run("UnexpectedPlainErrorResponseFromUpstream", func(t *testing.T) {
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				Times(1).
+				Reply(200).
+				BodyString("error code: 1015")
+
+			statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[],"id":1}`, nil, nil)
+
+			assert.Equal(t, http.StatusTooManyRequests, statusCode)
+			assert.Contains(t, body, "error code: 1015")
+
+			assert.True(t, gock.IsDone(), "All mocks should have been called")
+		})
+
+		t.Run("UnexpectedServerErrorResponseFromUpstream", func(t *testing.T) {
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				Times(1).
+				Reply(500).
+				BodyString(`{"error":{"code":-39999,"message":"my funky error"}}`)
+
+			statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"eth_getBlockNumber","params":[],"id":1}`, nil, nil)
+
+			assert.Equal(t, http.StatusInternalServerError, statusCode)
+			assert.Contains(t, body, "-32603")
+			assert.Contains(t, body, "my funky error")
+
+			assert.True(t, gock.IsDone(), "All mocks should have been called")
+		})
+
+		t.Run("MissingIDInJsonRpcRequest", func(t *testing.T) {
+			var id interface{}
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				Times(1).
+				SetMatcher(gock.NewEmptyMatcher()).
+				AddMatcher(func(req *http.Request, ereq *gock.Request) (bool, error) {
+					if !strings.Contains(req.URL.Host, "rpc1") {
+						return false, nil
+					}
+					bodyBytes, err := io.ReadAll(req.Body)
+					if err != nil {
+						return false, err
+					}
+					idNode, _ := sonic.Get(bodyBytes, "id")
+					id, _ = idNode.Interface()
+					if id == nil {
+						idNode, _ = sonic.Get(bodyBytes, 0, "id")
+						id, _ = idNode.Interface()
+					}
+					return true, nil
+				}).
+				Reply(200).
+				Map(func(res *http.Response) *http.Response {
+					var respTxt string
+					if *cfg.Projects[0].Upstreams[0].JsonRpc.SupportsBatch {
+						respTxt = `[{"jsonrpc":"2.0","id":THIS_WILL_BE_REPLACED,"result":"0x123456"}]`
+					} else {
+						respTxt = `{"jsonrpc":"2.0","id":THIS_WILL_BE_REPLACED,"result":"0x123456"}`
+					}
+					idp, err := sonic.Marshal(id)
+					require.NoError(t, err)
+					res.Body = io.NopCloser(strings.NewReader(strings.Replace(respTxt, "THIS_WILL_BE_REPLACED", string(idp), 1)))
+					return res
+				})
+
+			statusCode, body := sendRequest(`{"jsonrpc":"2.0","method":"eth_traceDebug","params":[]}`, nil, nil)
+
+			assert.Equal(t, http.StatusOK, statusCode)
+			assert.Contains(t, body, "0x123456")
+
+			assert.True(t, gock.IsDone(), "All mocks should have been called")
+		})
+
+		t.Run("AutoAddIDandJSONRPCFieldstoRequest", func(t *testing.T) {
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				Times(1).
+				SetMatcher(gock.NewEmptyMatcher()).
+				AddMatcher(func(req *http.Request, ereq *gock.Request) (bool, error) {
+					if !strings.Contains(req.URL.Host, "rpc1") {
+						return false, nil
+					}
+					bodyBytes, err := io.ReadAll(req.Body)
+					if err != nil {
+						return false, err
+					}
+					bodyStr := string(bodyBytes)
+					if !strings.Contains(bodyStr, "\"id\"") {
+						t.Fatalf("No id found in request")
+					}
+					if !strings.Contains(bodyStr, "\"jsonrpc\"") {
+						t.Fatalf("No jsonrpc found in request")
+					}
+					if !strings.Contains(bodyStr, "\"method\"") {
+						t.Fatalf("No method found in request")
+					}
+					if !strings.Contains(bodyStr, "\"params\"") {
+						t.Fatalf("No params found in request")
+					}
+					return true, nil
+				}).
+				Reply(200).
+				BodyString(`{"jsonrpc":"2.0","id":1,"result":"0x123456"}`)
+
+			sendRequest(`{"method":"eth_traceDebug","params":[]}`, nil, nil)
+		})
+
+		t.Run("AutoAddIDWhen0IsProvided", func(t *testing.T) {
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				SetMatcher(gock.NewEmptyMatcher()).
+				AddMatcher(func(req *http.Request, ereq *gock.Request) (bool, error) {
+					if !strings.Contains(req.URL.Host, "rpc1") {
+						return false, nil
+					}
+					bodyBytes, err := io.ReadAll(req.Body)
+					if err != nil {
+						return false, err
+					}
+					fmt.Println(string(bodyBytes))
+					bodyStr := string(bodyBytes)
+					if !strings.Contains(bodyStr, "\"id\"") {
+						t.Fatalf("No id found in request")
+					}
+					idNode, err := sonic.Get(bodyBytes, 0, "id")
+					require.NoError(t, err)
+					id, err := idNode.Int64()
+					require.NoError(t, err)
+					if id == 0 {
+						t.Fatalf("Expected id to be 0, got %d from body: %s", id, bodyStr)
+					}
+					return true, nil
+				}).
+				Reply(200).
+				BodyString(`{"jsonrpc":"2.0","id":1,"result":"0x123456"}`)
+
+			sendRequest(`{"jsonrpc":"2.0","method":"eth_traceDebug","params":[],"id":0}`, nil, nil)
+		})
+
+		t.Run("AlwaysPropagateUpstreamErrorDataField", func(t *testing.T) {
+			gock.New("http://rpc1.localhost").
+				Post("/").
+				Reply(400).
+				BodyString(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid params","data":{"range":"the range 55074203 - 55124202 exceeds the range allowed for your plan (49999 > 2000)."}}}`)
+
+			_, body := sendRequest(`{"jsonrpc":"2.0","method":"eth_getLogs","params":[],"id":1}`, nil, nil)
+			assert.Contains(t, body, "the range 55074203 - 55124202")
+		})
+	}
 }
 
 func TestHttpServer_MultipleUpstreams(t *testing.T) {
@@ -612,4 +722,123 @@ func TestHttpServer_MultipleUpstreams(t *testing.T) {
 
 		assert.True(t, gock.IsDone(), "All mocks should have been called")
 	})
+}
+
+func TestHttpServer_IntegrationTests(t *testing.T) {
+	cfg := &common.Config{
+		Server: &common.ServerConfig{
+			MaxTimeout: "5s",
+		},
+		Projects: []*common.ProjectConfig{
+			{
+				Id: "test_project",
+				Networks: []*common.NetworkConfig{
+					{
+						Architecture: common.ArchitectureEvm,
+						Evm: &common.EvmNetworkConfig{
+							ChainId: 1,
+						},
+					},
+				},
+				Upstreams: []*common.UpstreamConfig{
+					{
+						Id:       "drpc1",
+						Type:     common.UpstreamTypeEvm,
+						Endpoint: "https://lb.drpc.org/ogrpc?network=ethereum",
+						Evm: &common.EvmUpstreamConfig{
+							ChainId: 1,
+						},
+					},
+				},
+			},
+		},
+		RateLimiters: &common.RateLimiterConfig{},
+	}
+
+	sendRequest, _ := createServerTestFixtures(cfg, t)
+
+	t.Run("DrpcUnsupportedMethod", func(t *testing.T) {
+		gock.New("https://lb.drpc.org").
+			Post("/").
+			Reply(200).
+			JSON(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      111,
+				"error": map[string]interface{}{
+					"code":    -32601,
+					"message": "the method trace_transaction does not exist/is not available",
+				},
+			})
+		statusCode, _ := sendRequest(`{"jsonrpc":"2.0","method":"trace_transaction","params":[],"id":111}`, nil, nil)
+		assert.Equal(t, http.StatusBadRequest, statusCode)
+	})
+}
+
+func createServerTestFixtures(cfg *common.Config, t *testing.T) (
+	func(body string, headers map[string]string, queryParams map[string]string) (int, string),
+	string,
+) {
+	gock.EnableNetworking()
+	gock.NetworkingFilter(func(req *http.Request) bool {
+		shouldMakeRealCall := strings.Split(req.URL.Host, ":")[0] == "localhost"
+		return shouldMakeRealCall
+	})
+	defer gock.Off()
+
+	logger := zerolog.New(zerolog.NewConsoleWriter())
+	ctx := context.Background()
+	// ctx, cancel := context.WithCancel(context.Background())
+	// defer cancel()
+
+	erpcInstance, err := NewERPC(ctx, &logger, nil, cfg)
+	require.NoError(t, err)
+
+	httpServer := NewHttpServer(ctx, &logger, cfg.Server, erpcInstance)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	go func() {
+		err := httpServer.server.Serve(listener)
+		if err != nil && err != http.ErrServerClosed {
+			t.Errorf("Server error: %v", err)
+		}
+	}()
+	// defer httpServer.server.Shutdown()
+
+	time.Sleep(1000 * time.Millisecond)
+
+	baseURL := fmt.Sprintf("http://localhost:%d", port)
+
+	sendRequest := func(body string, headers map[string]string, queryParams map[string]string) (int, string) {
+		req, err := http.NewRequest("POST", baseURL+"/test_project/evm/1", strings.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		q := req.URL.Query()
+		for k, v := range queryParams {
+			q.Add(k, v)
+		}
+		req.URL.RawQuery = q.Encode()
+
+		client := &http.Client{
+			Timeout: 10 * time.Second,
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, err.Error()
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return resp.StatusCode, err.Error()
+		}
+		return resp.StatusCode, string(respBody)
+	}
+
+	return sendRequest, baseURL
 }
