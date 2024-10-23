@@ -148,6 +148,12 @@ func (r *RedisConnector) Set(ctx context.Context, partitionKey, rangeKey, value 
 
 	r.logger.Debug().Msgf("writing to Redis with partition key: %s and range key: %s", partitionKey, rangeKey)
 	method := strings.ToLower(strings.Split(rangeKey, ":")[0])
+
+	if _, found := r.ignoreMethod[method]; found {
+
+		return nil
+	}
+
 	ttl, found := r.ttls[method]
 	if !found {
 		ttl = time.Duration(0)
@@ -160,6 +166,12 @@ func (r *RedisConnector) Set(ctx context.Context, partitionKey, rangeKey, value 
 func (r *RedisConnector) Get(ctx context.Context, index, partitionKey, rangeKey string) (string, error) {
 	if r.client == nil {
 		return "", fmt.Errorf("redis client not initialized yet")
+	}
+
+	method := strings.ToLower(strings.Split(rangeKey, ":")[0])
+	if _, found := r.ignoreMethod[method]; found {
+
+		return "", common.NewErrRecordNotFound("Method is uncacheable", RedisDriverName)
 	}
 
 	var err error
