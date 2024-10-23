@@ -51,6 +51,15 @@ func (d *MemoryConnector) HasTTL(_ string) bool {
 	return false
 }
 
+func (d *MemoryConnector) IgnoreMethod(_ string) error {
+	d.logger.Debug().Msgf("Ignore Method not implemented for MemoryConnector")
+	return nil
+}
+
+func (d *MemoryConnector) IsMethodIgnored(_ string) bool {
+	return false
+}
+
 func (m *MemoryConnector) Set(ctx context.Context, partitionKey, rangeKey, value string) error {
 	key := fmt.Sprintf("%s:%s", partitionKey, rangeKey)
 	m.cache.Add(key, value)

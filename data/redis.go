@@ -22,9 +22,10 @@ const (
 var _ Connector = (*RedisConnector)(nil)
 
 type RedisConnector struct {
-	logger *zerolog.Logger
-	client *redis.Client
-	ttls   map[string]time.Duration
+	logger       *zerolog.Logger
+	client       *redis.Client
+	ttls         map[string]time.Duration
+	ignoreMethod map[string]bool
 }
 
 func NewRedisConnector(
@@ -35,8 +36,9 @@ func NewRedisConnector(
 	logger.Debug().Msgf("creating RedisConnector with config: %+v", cfg)
 
 	connector := &RedisConnector{
-		logger: logger,
-		ttls:   make(map[string]time.Duration),
+		logger:       logger,
+		ttls:         make(map[string]time.Duration),
+		ignoreMethod: make(map[string]bool),
 	}
 
 	// Attempt the actual connecting in background to avoid blocking the main thread.
@@ -126,6 +128,16 @@ func (r *RedisConnector) SetTTL(method string, ttlStr string) error {
 
 func (r *RedisConnector) HasTTL(method string) bool {
 	_, found := r.ttls[strings.ToLower(method)]
+	return found
+}
+
+func (r *RedisConnector) IgnoreMethod(method string) error {
+	r.ignoreMethod[strings.ToLower(method)] = true
+	return nil
+}
+
+func (r *RedisConnector) IsMethodIgnored(method string) bool {
+	_, found := r.ignoreMethod[strings.ToLower(method)]
 	return found
 }
 

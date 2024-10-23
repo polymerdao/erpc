@@ -17,6 +17,8 @@ type Connector interface {
 	Set(ctx context.Context, partitionKey, rangeKey, value string) error
 	SetTTL(method string, ttlStr string) error
 	HasTTL(method string) bool
+	IgnoreMethod(method string) error
+	IsMethodIgnored(method string) bool
 	Delete(ctx context.Context, index, partitionKey, rangeKey string) error
 }
 

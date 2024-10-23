@@ -98,6 +98,15 @@ func (p *PostgreSQLConnector) HasTTL(_ string) bool {
 	return false
 }
 
+func (d *PostgreSQLConnector) IgnoreMethod(_ string) error {
+	d.logger.Debug().Msgf("Ignore Method not implemented for PostgreSQLConnector")
+	return nil
+}
+
+func (d *PostgreSQLConnector) IsMethodIgnored(_ string) bool {
+	return false
+}
+
 func (p *PostgreSQLConnector) Set(ctx context.Context, partitionKey, rangeKey, value string) error {
 	if p.conn == nil {
 		return fmt.Errorf("PostgreSQLConnector not connected yet")

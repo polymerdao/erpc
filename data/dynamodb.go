@@ -270,6 +270,15 @@ func (d *DynamoDBConnector) HasTTL(_ string) bool {
 	return false
 }
 
+func (d *DynamoDBConnector) IgnoreMethod(_ string) error {
+	d.logger.Debug().Msgf("Ignore Method not implemented for DynamoDBConnector")
+	return nil
+}
+
+func (d *DynamoDBConnector) IsMethodIgnored(_ string) bool {
+	return false
+}
+
 func (d *DynamoDBConnector) Set(ctx context.Context, partitionKey, rangeKey, value string) error {
 	if d.client == nil {
 		return fmt.Errorf("DynamoDB client not initialized yet")
