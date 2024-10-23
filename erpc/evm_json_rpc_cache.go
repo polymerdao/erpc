@@ -42,6 +42,13 @@ func NewEvmJsonRpcCache(ctx context.Context, logger *zerolog.Logger, cfg *common
 		}
 	}
 
+	// set non cacheable methods
+	for _, cacheInfo := range cfg.NonCachableMethods {
+		if err := c.IgnoreMethod(cacheInfo.Method); err != nil {
+			return nil, err
+		}
+	}
+
 	return &EvmJsonRpcCache{
 		conn:   c,
 		logger: logger,
