@@ -42,13 +42,13 @@ type DatabaseConfig struct {
 }
 
 type ConnectorConfig struct {
-	Driver             string                       `yaml:"driver" json:"driver"`
-	Memory             *MemoryConnectorConfig       `yaml:"memory" json:"memory"`
-	Redis              *RedisConnectorConfig        `yaml:"redis" json:"redis"`
-	DynamoDB           *DynamoDBConnectorConfig     `yaml:"dynamodb" json:"dynamodb"`
-	PostgreSQL         *PostgreSQLConnectorConfig   `yaml:"postgresql" json:"postgresql"`
-	Methods            []*MethodCacheConfig         `yaml:"methods" json:"methods"`
-	NonCachableMethods []*NonCacheableMethodsConfig `yaml:"noncachable-methods" json:"noncacheable-methods"`
+	Driver              string                       `yaml:"driver" json:"driver"`
+	Memory              *MemoryConnectorConfig       `yaml:"memory" json:"memory"`
+	Redis               *RedisConnectorConfig        `yaml:"redis" json:"redis"`
+	DynamoDB            *DynamoDBConnectorConfig     `yaml:"dynamodb" json:"dynamodb"`
+	PostgreSQL          *PostgreSQLConnectorConfig   `yaml:"postgresql" json:"postgresql"`
+	Methods             []*MethodCacheConfig         `yaml:"methods" json:"methods"`
+	NonCacheableMethods []*NonCacheableMethodsConfig `yaml:"noncachable-methods" json:"noncacheable-methods"`
 }
 
 type MemoryConnectorConfig struct {

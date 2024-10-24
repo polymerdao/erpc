@@ -149,7 +149,7 @@ func (r *RedisConnector) Set(ctx context.Context, partitionKey, rangeKey, value 
 	r.logger.Debug().Msgf("writing to Redis with partition key: %s and range key: %s", partitionKey, rangeKey)
 	method := strings.ToLower(strings.Split(rangeKey, ":")[0])
 
-	if isIgnored := r.IsMethodIgnored(method); isIgnored {
+	if r.IsMethodIgnored(method) {
 
 		return nil
 	}
@@ -169,9 +169,9 @@ func (r *RedisConnector) Get(ctx context.Context, index, partitionKey, rangeKey 
 	}
 
 	method := strings.ToLower(strings.Split(rangeKey, ":")[0])
-	if isIgnored := r.IsMethodIgnored(method); isIgnored {
+	if r.IsMethodIgnored(method) {
 
-		return "", common.NewErrRecordNotFound("Method is uncacheable", RedisDriverName)
+		return "", common.NewErrRecordNotFound(fmt.Sprintf("Method %s is configured to bypass cache", method), RedisDriverName)
 	}
 
 	var err error
