@@ -65,6 +65,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 
 		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getTransactionByHash","params":["0x123"],"id":1}`))
 		resp := common.NewNormalizedResponse().WithBody([]byte(`{"hash":"0x123","blockNumber":null}`))
+		mockConnector.On("IsMethodIgnored", mock.AnythingOfType("string")).Return(false)
 
 		err := cache.Set(context.Background(), req, resp)
 
@@ -111,6 +112,7 @@ func TestEvmJsonRpcCache_Set(t *testing.T) {
 
 		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x123","latest"],"id":1}`))
 		resp := common.NewNormalizedResponse().WithBody([]byte(`"0x1234"`))
+		mockConnector.On("IsMethodIgnored", mock.AnythingOfType("string")).Return(false)
 
 		err := cache.Set(context.Background(), req, resp)
 
