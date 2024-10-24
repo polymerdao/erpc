@@ -47,16 +47,16 @@ func (m *MemoryConnector) SetTTL(_ string, _ string) error {
 	return nil
 }
 
-func (d *MemoryConnector) HasTTL(_ string) bool {
+func (m *MemoryConnector) HasTTL(_ string) bool {
 	return false
 }
 
-func (d *MemoryConnector) IgnoreMethod(_ string) error {
-	d.logger.Debug().Msgf("Ignore Method not implemented for MemoryConnector")
+func (m *MemoryConnector) IgnoreMethod(_ string) error {
+	m.logger.Debug().Msgf("Ignore Method not implemented for MemoryConnector")
 	return nil
 }
 
-func (d *MemoryConnector) IsMethodIgnored(_ string) bool {
+func (m *MemoryConnector) IsMethodIgnored(_ string) bool {
 	return false
 }
 
