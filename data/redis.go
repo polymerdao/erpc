@@ -22,9 +22,10 @@ const (
 var _ Connector = (*RedisConnector)(nil)
 
 type RedisConnector struct {
-	logger *zerolog.Logger
-	client *redis.Client
-	ttls   map[string]time.Duration
+	logger       *zerolog.Logger
+	client       *redis.Client
+	ttls         map[string]time.Duration
+	ignoreMethod map[string]bool
 }
 
 func NewRedisConnector(
@@ -35,8 +36,9 @@ func NewRedisConnector(
 	logger.Debug().Msgf("creating RedisConnector with config: %+v", cfg)
 
 	connector := &RedisConnector{
-		logger: logger,
-		ttls:   make(map[string]time.Duration),
+		logger:       logger,
+		ttls:         make(map[string]time.Duration),
+		ignoreMethod: make(map[string]bool),
 	}
 
 	// Attempt the actual connecting in background to avoid blocking the main thread.
@@ -129,6 +131,16 @@ func (r *RedisConnector) HasTTL(method string) bool {
 	return found
 }
 
+func (r *RedisConnector) IgnoreMethod(method string) error {
+	r.ignoreMethod[strings.ToLower(method)] = true
+	return nil
+}
+
+func (r *RedisConnector) IsMethodIgnored(method string) bool {
+	_, found := r.ignoreMethod[strings.ToLower(method)]
+	return found
+}
+
 func (r *RedisConnector) Set(ctx context.Context, partitionKey, rangeKey, value string) error {
 	if r.client == nil {
 		return fmt.Errorf("redis client not initialized yet")
@@ -136,6 +148,12 @@ func (r *RedisConnector) Set(ctx context.Context, partitionKey, rangeKey, value 
 
 	r.logger.Debug().Msgf("writing to Redis with partition key: %s and range key: %s", partitionKey, rangeKey)
 	method := strings.ToLower(strings.Split(rangeKey, ":")[0])
+
+	if r.IsMethodIgnored(method) {
+
+		return nil
+	}
+
 	ttl, found := r.ttls[method]
 	if !found {
 		ttl = time.Duration(0)
@@ -148,6 +166,12 @@ func (r *RedisConnector) Set(ctx context.Context, partitionKey, rangeKey, value 
 func (r *RedisConnector) Get(ctx context.Context, index, partitionKey, rangeKey string) (string, error) {
 	if r.client == nil {
 		return "", fmt.Errorf("redis client not initialized yet")
+	}
+
+	method := strings.ToLower(strings.Split(rangeKey, ":")[0])
+	if r.IsMethodIgnored(method) {
+
+		return "", common.NewErrRecordNotFound(fmt.Sprintf("Method %s is configured to bypass cache", method), RedisDriverName)
 	}
 
 	var err error

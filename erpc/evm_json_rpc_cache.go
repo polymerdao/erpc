@@ -42,6 +42,16 @@ func NewEvmJsonRpcCache(ctx context.Context, logger *zerolog.Logger, cfg *common
 		}
 	}
 
+	// set non cacheable methods
+	for _, cacheInfo := range cfg.NonCacheableMethods {
+		logger.Debug().Str("method", cacheInfo.Method).Msg("configuring non-cacheable method")
+		if err := c.IgnoreMethod(cacheInfo.Method); err != nil {
+			return nil, err
+		}
+		logger.Debug().Str("method", cacheInfo.Method).Msg("successfully configured non-cacheable method")
+
+	}
+
 	return &EvmJsonRpcCache{
 		conn:   c,
 		logger: logger,
@@ -61,6 +71,11 @@ func (c *EvmJsonRpcCache) Get(ctx context.Context, req *common.NormalizedRequest
 	rpcReq, err := req.JsonRpcRequest()
 	if err != nil {
 		return nil, err
+	}
+
+	// Skip cache for ignored methods
+	if c.conn.IsMethodIgnored(rpcReq.Method) {
+		return nil, nil
 	}
 
 	hasTTL := c.conn.HasTTL(rpcReq.Method)
@@ -120,6 +135,11 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 	rpcResp, err := resp.JsonRpcResponse()
 	if err != nil {
 		return err
+	}
+
+	// Skip cache for ignored methods
+	if c.conn.IsMethodIgnored(rpcReq.Method) {
+		return nil
 	}
 
 	lg := c.logger.With().Str("networkId", req.NetworkId()).Str("method", rpcReq.Method).Logger()

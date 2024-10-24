@@ -41,6 +41,18 @@ func (m *MockConnector) HasTTL(method string) bool {
 	return args.Bool(0)
 }
 
+// IgnoreMethod mocks the IgnoreMethod method of the Connector interface
+func (m *MockConnector) IgnoreMethod(method string) error {
+	args := m.Called(method)
+	return args.Error(0)
+}
+
+// IsMethodIgnored mocks the IsMethodIgnored method of the Connector interface
+func (m *MockConnector) IsMethodIgnored(method string) bool {
+	args := m.Called(method)
+	return args.Bool(0)
+}
+
 // NewMockConnector creates a new instance of MockConnector
 func NewMockConnector() *MockConnector {
 	return &MockConnector{}
