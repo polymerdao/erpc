@@ -48,7 +48,7 @@ type ConnectorConfig struct {
 	DynamoDB            *DynamoDBConnectorConfig     `yaml:"dynamodb" json:"dynamodb"`
 	PostgreSQL          *PostgreSQLConnectorConfig   `yaml:"postgresql" json:"postgresql"`
 	Methods             []*MethodCacheConfig         `yaml:"methods" json:"methods"`
-	NonCacheableMethods []*NonCacheableMethodsConfig `yaml:"noncachable-methods" json:"noncacheable-methods"`
+	NonCacheableMethods []*NonCacheableMethodsConfig `yaml:"noncacheable-methods" json:"noncacheable-methods"`
 }
 
 type MemoryConnectorConfig struct {
